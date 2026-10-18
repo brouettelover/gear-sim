@@ -7,7 +7,7 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent as RPointerEvent } from 'react';
 import type { Computed, Project } from '../core/project';
 import { contactOverlay } from '../core/contact';
-import { poses, type TrainNode } from '../core/train';
+import { poses, type ChainSpec, type TrainNode } from '../core/train';
 import { fmt, toMm, toRpm } from '../core/units';
 import type { Updater } from './App';
 import { CheckField } from './fields';
@@ -23,6 +23,21 @@ interface Props {
 }
 
 interface Box { x: number; y: number; w: number; h: number }
+
+/**
+ * Roue qui fixe la position de la tige de `id` : on remonte les roues coaxiales jusqu'à celle qui
+ * engrène avec sa menante (la tige tourne alors autour de celle-ci). Aucune sur l'arbre moteur.
+ */
+function shaftDrive(chain: ChainSpec, id: string): string | undefined {
+  const byId = new Map(chain.gears.map((g) => [g.gear.id, g]));
+  let g = byId.get(id);
+  for (let i = 0; g && i < chain.gears.length; i++) {
+    if (g.placement.kind === 'mesh') return g.gear.id;
+    if (g.placement.kind === 'root') return undefined;
+    g = byId.get(g.placement.parent);
+  }
+  return undefined;
+}
 
 /** Boîte englobante (mm) de toutes les roues au repos. */
 function sceneBounds(nodes: TrainNode[], planetary: boolean) {
@@ -127,9 +142,9 @@ export function TrainView({ project, computed, update, selectedId, onSelect }: P
     (e.target as Element).setPointerCapture?.(e.pointerId);
     if (gearId) {
       onSelect(gearId);
-      const g = project.chain.gears.find((x) => x.gear.id === gearId);
-      if (train.mode === 'chain' && g?.placement.kind === 'mesh') {
-        drag.current = { kind: 'gear', id: gearId };
+      const drive = train.mode === 'chain' ? shaftDrive(project.chain, gearId) : undefined;
+      if (drive) {
+        drag.current = { kind: 'gear', id: drive };
         e.stopPropagation();
         return;
       }
@@ -226,9 +241,26 @@ export function TrainView({ project, computed, update, selectedId, onSelect }: P
             selectedId={selectedId}
             onSelect={onSelect}
             fitSignal={fitSignal}
+            movable={(id) => {
+              if (train.mode !== 'chain') return undefined;
+              const g = project.chain.gears.find((x) => x.gear.id === id);
+              if (!g) return undefined;
+              const d = shaftDrive(project.chain, id);
+              const dg = d ? project.chain.gears.find((x) => x.gear.id === d) : undefined;
+              const drive = dg && dg.placement.kind === 'mesh' ? { id: d!, parent: dg.placement.parent, inside: nodeById.get(d!)?.geo.kind === 'internal' } : undefined;
+              return { axialOffset: g.axialOffset ?? 0, drive };
+            }}
+            onMove={(id, m) =>
+              update((dr) => {
+                const g = dr.chain.gears.find((x) => x.gear.id === id);
+                if (!g) return;
+                if (m.axialOffset !== undefined) g.axialOffset = Math.abs(m.axialOffset) < 1e-9 ? 0 : m.axialOffset;
+                if (m.angle !== undefined && g.placement.kind === 'mesh') g.placement.angle = m.angle;
+              })
+            }
           />
           <p className="hint">
-            Glisser : tourner autour · Maj + glisser ou clic droit : déplacer · molette : zoom · clic : sélectionner{(project.assembly?.freeRods?.length ?? 0) > 0 ? ' · glisser une tige libre (disque gris) : la déplacer' : ''}. Positions axiales et tiges : onglet Train, section « Montage 3D ».
+            Glisser : tourner autour · Maj + glisser ou clic droit : déplacer la vue · molette : zoom · clic : sélectionner · <b>glisser la roue sélectionnée</b> : le long de sa tige, ou autour de sa roue menante (la tige suit){(project.assembly?.freeRods?.length ?? 0) > 0 ? ' · glisser une tige libre (disque gris) : la déplacer' : ''}. Positions axiales et tiges : onglet Train, section « Montage 3D ».
             {selectedNode && ` Sélection : ${selectedNode.spec.name}, z = ${fmt(toMm(computed.assembly.placed[selectedNode.id]?.z ?? 0), 2)} mm.`}
           </p>
         </>
@@ -346,7 +378,7 @@ export function TrainView({ project, computed, update, selectedId, onSelect }: P
       </svg>
       <p className="hint">
         {hidden && <b>Les roues d'axes perpendiculaires (renvoi conique, vis sans fin) ne s'affichent qu'en 3D. </b>}
-        Molette : zoom · glisser le fond : déplacer · {train.mode === 'chain' ? 'glisser une roue : la faire tourner autour de sa roue menante · ' : ''}clic : sélectionner{(project.assembly?.freeRods?.length ?? 0) > 0 ? ' · glisser une tige libre (disque gris) : la déplacer' : ''}.
+        Molette : zoom · glisser le fond : déplacer · {train.mode === 'chain' ? 'glisser une roue : déplacer sa tige autour de la roue menante · ' : ''}clic : sélectionner{(project.assembly?.freeRods?.length ?? 0) > 0 ? ' · glisser une tige libre (disque gris) : la déplacer' : ''}.
         {selectedNode && ` Sélection : ${selectedNode.spec.name}, ${fmt(Math.abs(toRpm(selectedNode.ratio * omega)), 1)} tr/min.`}
       </p>
       </>

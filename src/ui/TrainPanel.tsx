@@ -109,8 +109,10 @@ function ChainEditor({ project, computed, update, selectedId, onSelect }: { proj
   const gears = project.chain.gears;
   const sel = gears.find((g) => g.gear.id === selectedId) ?? gears[0];
 
-  const add = (kind: 'mesh' | 'coaxial') =>
+  /** `end` : roue sur la même tige, à l'autre bout (tige de transmission) */
+  const add = (kind0: 'mesh' | 'coaxial' | 'end') =>
     update((d) => {
+      const kind = kind0 === 'end' ? 'coaxial' : kind0;
       const parent = d.chain.gears.find((g) => g.gear.id === sel.gear.id)!.gear;
       const helix = parent.type === 'helical' || parent.type === 'herringbone';
       const g = defaultGear({
@@ -142,7 +144,10 @@ function ChainEditor({ project, computed, update, selectedId, onSelect }: { proj
         g.teeth = sug.teeth;
       }
       const placement: Placement = kind === 'mesh' ? { kind: 'mesh', parent: parent.id, angle } : { kind: 'coaxial', parent: parent.id };
-      d.chain.gears.push({ gear: g, placement });
+      // à l'autre bout : tige de 20 mm entre les roues (derrière une conique, devant sinon), réglable en glissant la roue en 3D
+      const axialOffset = kind0 === 'end' ? (parent.type === 'bevel' ? -20 : 20) * MM : undefined;
+      if (kind0 === 'end') g.name = `Bout de tige ${d.chain.gears.length + 1}`;
+      d.chain.gears.push({ gear: g, placement, ...(axialOffset ? { axialOffset } : {}) });
       d.chain.outputId = g.id;
       setTimeout(() => onSelect(g.id));
     });
@@ -232,6 +237,7 @@ function ChainEditor({ project, computed, update, selectedId, onSelect }: { proj
       <div className="row">
         <button onClick={() => add('mesh')}>+ Roue qui engrène avec « {sel.gear.name} »</button>
         <button onClick={() => add('coaxial')}>+ Roue sur le même arbre</button>
+        <button onClick={() => add('end')}>+ Roue à l'autre bout de la tige</button>
         <button onClick={() => addAngle('bevel')}>+ Renvoi conique à 90°</button>
         <button onClick={() => addAngle('worm')}>+ Vis sans fin</button>
         {sel.placement.kind !== 'root' && (
@@ -263,7 +269,7 @@ function ChainEditor({ project, computed, update, selectedId, onSelect }: { proj
         </div>
       )}
       <SelectField label="Arbre de sortie" value={project.chain.outputId} options={gears.map((g) => ({ value: g.gear.id, label: g.gear.name }))} onChange={(v) => update((d) => void (d.chain.outputId = v))} />
-      <p className="muted small">Une roue sur le même arbre est placée dans le plan suivant : c'est ainsi qu'on construit un train composé. Chaque arbre autre que celui du moteur est une tige (section « Montage 3D »).</p>
+      <p className="muted small">Une roue sur le même arbre est placée dans le plan suivant : c'est ainsi qu'on construit un train composé. Chaque arbre autre que celui du moteur est une tige (section « Montage 3D »). « Roue à l'autre bout de la tige » crée une tige de transmission avec une roue à chaque extrémité. Pour déplacer une roue, sélectionnez-la puis glissez-la : en 2D autour de sa roue menante (toute la tige suit), en 3D aussi le long de sa tige.</p>
     </Section>
   );
 }

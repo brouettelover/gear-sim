@@ -2,6 +2,8 @@
  * Vue 3D du montage : roues à leur position axiale, tiges, arbre et corps du moteur (schématique),
  * flasques en transparence. Les roues tournent avec l'animation de la vue 2D.
  * Glisser : orbite · Maj + glisser ou clic droit : déplacer · molette : zoom · clic : sélection.
+ * Glisser la roue sélectionnée : le long de son axe (décalage axial) ou autour de sa roue menante
+ * (toute la tige suit), selon la direction du geste.
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { WORLD, toWorld, type Assembly, type Frame } from '../core/assembly';
@@ -29,6 +31,12 @@ interface Props {
   onSelect: (id: string) => void;
   /** incrémenté pour recadrer la vue */
   fitSignal: number;
+  /**
+   * déplacement d'une roue à la souris : `drive` = roue qui fixe la position de la tige (placée autour de sa
+   * menante), absente si la tige ne peut pas tourner (arbre moteur)
+   */
+  movable?: (id: string) => { axialOffset: number; drive?: { id: string; parent: string; inside: boolean } } | undefined;
+  onMove?: (id: string, m: { axialOffset?: number; angle?: number }) => void;
 }
 
 interface Camera { yaw: number; pitch: number; dist: number; target: Vec3 }
@@ -44,7 +52,7 @@ const frameMatrix = (f: Frame) =>
 
 interface Item { mesh: string; model: Float32Array; color: Vec3; alpha: number; pick?: string }
 
-export function View3D({ train, asm, poses, levels, show, selectedId, onSelect, fitSignal }: Props) {
+export function View3D({ train, asm, poses, levels, show, selectedId, onSelect, fitSignal, movable, onMove }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rRef = useRef<Renderer | null>(null);
   const meshes = useRef(new Map<string, GpuMesh>());
@@ -260,17 +268,133 @@ export function View3D({ train, asm, poses, levels, show, selectedId, onSelect, 
     gl.deleteRenderbuffer(tex);
     gl.deleteRenderbuffer(depth);
     const code = px[0] + (px[1] << 8);
-    if (code > 0 && ids[code - 1]) onSelect(ids[code - 1]);
+    // repli : lancer de rayon sur les cylindres englobants
+    const id = code > 0 && ids[code - 1] ? ids[code - 1] : rayPick(cx, cy);
+    if (id) onSelect(id);
     draw();
+  };
+
+  // --- déplacement d'une roue ---
+  const sub3 = (a: Vec3, b: Vec3): Vec3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+  const dot3 = (a: Vec3, b: Vec3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const cross3 = (a: Vec3, b: Vec3): Vec3 => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  /** point monde (mm) → pixels CSS du canevas */
+  const project = (p: Vec3) => {
+    const c = canvasRef.current!;
+    const { vp } = viewProj(c.clientWidth, c.clientHeight);
+    const x = vp[0] * p[0] + vp[4] * p[1] + vp[8] * p[2] + vp[12];
+    const y = vp[1] * p[0] + vp[5] * p[1] + vp[9] * p[2] + vp[13];
+    const w = vp[3] * p[0] + vp[7] * p[1] + vp[11] * p[2] + vp[15];
+    return { x: ((x / w + 1) / 2) * c.clientWidth, y: ((1 - y / w) / 2) * c.clientHeight };
+  };
+  /** rayon de vue passant par le pixel (cx, cy) : origine et direction (mm) */
+  const ray = (cx: number, cy: number) => {
+    const c = canvasRef.current!;
+    const { eye } = viewProj(c.clientWidth, c.clientHeight);
+    const f = normalize(sub3(cam.current.target, eye));
+    const right = normalize(cross3(f, [0, 0, 1]));
+    const up = cross3(right, f);
+    const t = Math.tan((35 * Math.PI) / 360);
+    const nx = ((2 * cx) / c.clientWidth - 1) * t * (c.clientWidth / c.clientHeight);
+    const ny = (1 - (2 * cy) / c.clientHeight) * t;
+    return { o: eye, d: [0, 1, 2].map((i) => f[i] + right[i] * nx + up[i] * ny) as Vec3 };
+  };
+  /** roue la plus proche sous le pixel, d'après son cylindre englobant (rayon de tête, hauteur) */
+  const rayPick = (cx: number, cy: number): string | undefined => {
+    const { o, d } = ray(cx, cy);
+    let best: string | undefined;
+    let tBest = Infinity;
+    for (const n of train.nodes) {
+      if (n.geo.kind === 'rack') continue;
+      const p = asm.placed[n.id];
+      if (!p) continue;
+      const F = asm.groups[p.group] ?? WORLD;
+      const O = F.o.map((v) => v * K) as Vec3;
+      const loc = (q: Vec3): Vec3 => [dot3(q, F.u), dot3(q, F.v), dot3(q, F.w)];
+      const lo = loc(sub3(o, O)), ld = loc(d);
+      const x = lo[0] - n.x * K, y = lo[1] - n.y * K;
+      const R = (n.geo.kind === 'internal' ? n.geo.rf + n.spec.rimWidth : n.geo.ra) * K;
+      const z0 = p.z * K, z1 = (p.z + p.width) * K;
+      const hits: number[] = [];
+      const A = ld[0] ** 2 + ld[1] ** 2, B = 2 * (x * ld[0] + y * ld[1]), C = x * x + y * y - R * R;
+      const disc = B * B - 4 * A * C;
+      if (A > 1e-12 && disc >= 0) for (const t of [(-B - Math.sqrt(disc)) / (2 * A), (-B + Math.sqrt(disc)) / (2 * A)]) {
+        const z = lo[2] + ld[2] * t;
+        if (z >= z0 && z <= z1) hits.push(t);
+      }
+      if (Math.abs(ld[2]) > 1e-12) for (const zc of [z0, z1]) {
+        const t = (zc - lo[2]) / ld[2];
+        if (Math.hypot(x + ld[0] * t, y + ld[1] * t) <= R) hits.push(t);
+      }
+      for (const t of hits) if (t > 0 && t < tBest) { tBest = t; best = n.id; }
+    }
+    return best;
+  };
+  const centerMm = (id: string): Vec3 => {
+    const n = train.nodes.find((x) => x.id === id)!;
+    const p = asm.placed[id];
+    return toWorld(asm.groups[p?.group ?? 0] ?? WORLD, n.x, n.y, (p?.z ?? 0) + (p?.width ?? 0) / 2).map((v) => v * K) as Vec3;
+  };
+  const move = useRef<{ id: string; sx: number; sy: number; offset0: number; lock?: 'axial' | 'around' } | null>(null);
+  /** angle de la roue `drive` autour de sa menante, d'après le point visé dans le plan de la menante */
+  const aroundAngle = (cx: number, cy: number, drive: { parent: string; inside: boolean }) => {
+    const pp = asm.placed[drive.parent];
+    const F = asm.groups[pp?.group ?? 0] ?? WORLD;
+    const P = centerMm(drive.parent);
+    const { o, d } = ray(cx, cy);
+    const den = dot3(d, F.w);
+    if (Math.abs(den) < 1e-6) return undefined;
+    const t = dot3(sub3(P, o), F.w) / den;
+    if (t <= 0) return undefined;
+    const rel = sub3([0, 1, 2].map((i) => o[i] + d[i] * t) as Vec3, P);
+    const a = Math.atan2(dot3(rel, F.v), dot3(rel, F.u)) + (drive.inside ? Math.PI : 0);
+    return Math.round(a / (Math.PI / 180)) * (Math.PI / 180);
   };
 
   const drag = useRef<{ x: number; y: number; sx: number; sy: number; pan: boolean; moved: boolean } | null>(null);
   const onPointerDown = (e: React.PointerEvent) => {
     (e.target as Element).setPointerCapture?.(e.pointerId);
+    // la roue sélectionnée se déplace ; ailleurs, on tourne autour de la scène
+    if (selectedId && onMove && movable && e.button === 0 && !e.shiftKey) {
+      const rect = canvasRef.current!.getBoundingClientRect();
+      const m = movable(selectedId);
+      if (m && rayPick(e.clientX - rect.left, e.clientY - rect.top) === selectedId) {
+        move.current = { id: selectedId, sx: e.clientX, sy: e.clientY, offset0: m.axialOffset };
+        interacted.current = true;
+        return;
+      }
+    }
     drag.current = { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, pan: e.shiftKey || e.button === 2, moved: false };
     interacted.current = true;
   };
   const onPointerMove = (e: React.PointerEvent) => {
+    const mv = move.current;
+    if (mv && onMove && movable) {
+      const m = movable(mv.id);
+      if (!m) return;
+      const dx = e.clientX - mv.sx, dy = e.clientY - mv.sy;
+      // direction de l'axe à l'écran
+      const C = centerMm(mv.id);
+      const F = asm.groups[asm.placed[mv.id]?.group ?? 0] ?? WORLD;
+      const a0 = project(C), a1 = project([C[0] + F.w[0], C[1] + F.w[1], C[2] + F.w[2]]);
+      const ax = a1.x - a0.x, ay = a1.y - a0.y;
+      const pxPerMm = Math.hypot(ax, ay);
+      if (!mv.lock) {
+        if (Math.hypot(dx, dy) < 6) return;
+        const along = pxPerMm > 0.2 ? Math.abs(dx * ax + dy * ay) / pxPerMm / Math.hypot(dx, dy) : 0;
+        mv.lock = along > 0.8 || !m.drive ? 'axial' : 'around';
+      }
+      if (mv.lock === 'axial') {
+        if (pxPerMm < 0.05) return;
+        const mm = (dx * ax + dy * ay) / pxPerMm / pxPerMm;
+        onMove(mv.id, { axialOffset: (Math.round((mv.offset0 / MM + mm) * 10) / 10) * MM });
+      } else if (m.drive) {
+        const rect = canvasRef.current!.getBoundingClientRect();
+        const ang = aroundAngle(e.clientX - rect.left, e.clientY - rect.top, m.drive);
+        if (ang !== undefined) onMove(m.drive.id, { angle: ang });
+      }
+      return;
+    }
     const d = drag.current;
     if (!d) return;
     const dx = e.clientX - d.x, dy = e.clientY - d.y;
@@ -290,6 +414,10 @@ export function View3D({ train, asm, poses, levels, show, selectedId, onSelect, 
     draw();
   };
   const onPointerUp = (e: React.PointerEvent) => {
+    if (move.current) {
+      move.current = null;
+      return;
+    }
     const d = drag.current;
     drag.current = null;
     if (d && !d.moved) {
@@ -311,7 +439,7 @@ export function View3D({ train, asm, poses, levels, show, selectedId, onSelect, 
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
-        onPointerCancel={() => (drag.current = null)}
+        onPointerCancel={() => { drag.current = null; move.current = null; }}
         onWheel={onWheel}
         onContextMenu={(e) => e.preventDefault()}
       />
