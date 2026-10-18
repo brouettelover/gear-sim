@@ -8,7 +8,7 @@ import { steadyState, type Drivetrain, type LoadSpec, type SteadyState, type Vol
 import { lewisBending, safetyLevel, type BendingResult, type SafetyLevel } from './strength';
 import { analyzeChain, analyzePlanetary, gearLoads, type ChainSpec, type PlanetarySpec, type TrainAnalysis, type TrainNode } from './train';
 import type { GearSpec, PrintSettings, Warning } from './types';
-import { DEG, MM } from './units';
+import { DEG, MM, fmt } from './units';
 
 export interface SimSettings {
   profile: VoltageProfile;
@@ -61,8 +61,8 @@ export const DEFAULT_PRINT: PrintSettings = {
 };
 
 export function defaultProject(): Project {
-  const pinion = defaultGear({ name: 'Pignon moteur', teeth: 12, profileShift: 0.3, bore: { type: 'd', diameter: 3 * MM, flat: 2.5 * MM } });
-  const wheel = defaultGear({ name: 'Roue de sortie', teeth: 36, bore: { type: 'round', diameter: 5 * MM, flat: 0 } });
+  const pinion = defaultGear({ name: 'Pignon moteur', teeth: 14, profileShift: 0.2, bore: { type: 'd', diameter: 3 * MM, flat: 2.5 * MM } });
+  const wheel = defaultGear({ name: 'Roue de sortie', teeth: 42, bore: { type: 'round', diameter: 5 * MM, flat: 0 } });
   const sun = defaultGear({ name: 'Soleil', teeth: 18, bore: { type: 'd', diameter: 3 * MM, flat: 2.5 * MM } });
   const planet = defaultGear({ name: 'Satellite', teeth: 18, bore: { type: 'round', diameter: 3 * MM, flat: 0 } });
   const ring = defaultGear({ name: 'Couronne', type: 'internal', teeth: 54, bore: { type: 'none', diameter: 0, flat: 0 }, rimWidth: 3 * MM });
@@ -159,13 +159,13 @@ export function computeProject(p: Project): Computed {
     for (const w of m.geo.warnings) warnings.push({ ...w, message: `${a} / ${b} : ${w.message}` });
   }
   if (motor.ktKeMismatch > 0.15) {
-    warnings.push({ severity: 'info', message: `Fiche moteur peu cohérente : Kt et Ke diffèrent de ${(motor.ktKeMismatch * 100).toFixed(0)} % (ils devraient être égaux en SI).` });
+    warnings.push({ severity: 'info', message: `Fiche moteur peu cohérente : Kt et Ke diffèrent de ${fmt(motor.ktKeMismatch * 100, 0)} % (ils devraient être égaux en SI).` });
   }
   if (steady.stalled) warnings.push({ severity: 'error', message: 'Le moteur cale : la charge dépasse le couple disponible en sortie.' });
-  else if (steady.stallMargin < 0.5) warnings.push({ severity: 'warning', message: `Point de fonctionnement à ${((1 - steady.stallMargin) * 100).toFixed(0)} % du couple de blocage : le moteur va chauffer.` });
+  else if (steady.stallMargin < 0.5) warnings.push({ severity: 'warning', message: `Point de fonctionnement à ${fmt((1 - steady.stallMargin) * 100, 0)} % du couple de blocage : le moteur va chauffer.` });
   for (const s of strength) {
-    if (s.operating.safety < 1.25) warnings.push({ severity: 'error', message: `${s.node.spec.name} : coefficient de sécurité ${s.operating.safety.toFixed(2)} en fonctionnement, rupture probable.` });
-    else if (s.stall.safety < 1) warnings.push({ severity: 'warning', message: `${s.node.spec.name} : casse probable si le moteur est bloqué (n = ${s.stall.safety.toFixed(2)} au blocage). Prévoir une limitation de courant ou un limiteur de couple.` });
+    if (s.operating.safety < 1.25) warnings.push({ severity: 'error', message: `${s.node.spec.name} : coefficient de sécurité ${fmt(s.operating.safety, 2)} en fonctionnement, rupture probable.` });
+    else if (s.stall.safety < 1) warnings.push({ severity: 'warning', message: `${s.node.spec.name} : casse probable si le moteur est bloqué (n = ${fmt(s.stall.safety, 2)} au blocage). Prévoir une limitation de courant ou un limiteur de couple.` });
   }
 
   const reminders: string[] = [];

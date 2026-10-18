@@ -13,6 +13,23 @@ npm run build   # version statique dans dist/
 
 Unités : SI en interne (m, rad, N·m, rad/s, kg, Pa) ; affichage en mm, N·mm et tr/min.
 
+## Interface
+
+Onglets, avec la vue animée du train et la liste des vérifications toujours visibles à droite :
+
+1. **Engrenage** : type (droit, hélicoïdal, chevron, crémaillère, couronne), module, dents, angle de pression,
+   largeur, déport, angle d'hélice, alésage (rond, en D pour l'arbre N20, hexagonal), matériau ; réglages
+   d'impression (jeu au flanc, jeu radial, compensation des alésages, buse) ; géométrie calculée et profil.
+2. **Train** : simple, composé (roues sur un même arbre, dans des plans différents) ou planétaire ;
+   entraxes automatiques, placement en glissant les roues dans la vue ; rapport, sens et vitesse de chaque arbre, rendement.
+3. **Moteur et charge** : préréglages N20 / 130 / 370 / 540 modifiables, paramètres identifiés, courbe
+   couple-vitesse avec point de fonctionnement ; charge (couple, visqueux, inertie, poids sur tambour) ; régime permanent.
+4. **Simulation** : échelon, rampe ou PWM, intégration RK4, graphiques vitesse / courant / couples / puissances.
+5. **Résistance** : Lewis par roue en service et moteur bloqué, code couleur, matériaux modifiables, réglages d'impression conseillés.
+6. **Export** : STL, SVG et DXF de chaque pièce, fiche récapitulative imprimable.
+
+Les projets se sauvegardent automatiquement dans le navigateur (localStorage) et s'exportent / s'importent en JSON.
+
 ## Modules de calcul (`src/core`)
 
 | Module | Rôle |
@@ -25,6 +42,8 @@ Unités : SI en interne (m, rad, N·m, rad/s, kg, Pa) ; affichage en mm, N·mm e
 | `strength.ts` | Contrainte de Lewis et coefficient de sécurité |
 | `materials.ts` | PLA, PETG, ABS, ASA, PA, PA-CF, POM |
 | `export.ts` | STL (avec torsion hélicoïdale / chevron), SVG, DXF |
+| `contact.ts` | Ligne d'action et points de contact instantanés (affichage) |
+| `report.ts` | Fiche récapitulative HTML |
 | `project.ts` | Modèle de projet (JSON), calcul complet |
 
 ## Formules utilisées

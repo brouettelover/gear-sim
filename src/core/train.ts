@@ -349,7 +349,11 @@ export function poses(t: TrainAnalysis, thetaMotor: number): Pose[] {
   }
   for (const n of [...t.nodes].sort((a, b) => a.layer - b.layer)) {
     if (n.geo.kind === 'rack') {
-      const s = n.rackShift! + n.ratio * thetaMotor;
+      // la crémaillère a une longueur finie : pour l'animation, son déplacement est ramené
+      // dans un intervalle d'un nombre entier de pas (l'engrènement reste en phase)
+      const span = Math.max(1, Math.floor(n.geo.z / 2)) * n.geo.pt;
+      const travel = n.ratio * thetaMotor;
+      const s = n.rackShift! + travel - Math.floor(travel / span + 0.5) * span;
       const ca = Math.cos(n.rackAngle!);
       const sa = Math.sin(n.rackAngle!);
       out.push({ nodeId: n.id, key: n.id, x: n.x + s * ca, y: n.y + s * sa, angle: n.rackAngle! });
