@@ -37,6 +37,13 @@ export function buildReport(p: Project, c: Computed, date = new Date()): string 
     const a = printAdvice(x.node, p.print, x.operating.safety);
     return [esc(x.node.spec.name), fmt(x.operating.ft, 2) + ' N', fmt(x.operating.stress / MPA, 2) + ' MPa', `<b class="${x.level}">${fmt(x.operating.safety, 2)}</b>`, `<b class="${x.stallLevel}">${fmt(x.stall.safety, 2)}</b>`, a.orientation, String(a.walls), `${a.infill} %`, `≤ ${fmt(toMm(a.layer), 2)} mm`];
   });
+  const asm = c.assembly;
+  const name = (id: string) => esc(t.nodes.find((n) => n.id === id)?.spec.name ?? id);
+  const shaftRows = asm.shafts.map((sh) => [
+    sh.kind === 'motor' ? 'Arbre moteur' : `Tige de « ${name(sh.rootGearId)} »`,
+    sh.gearIds.map((id) => `${name(id)} (z ${fmt(toMm(asm.placed[id].z), 2)} mm)`).join(', '),
+    sh.kind === 'motor' ? `Ø ${fmt(toMm(2 * sh.radius), 1)} mm` : `Ø ${fmt(toMm(2 * sh.radius), 1)} × ${fmt(toMm(sh.zTo - sh.zFrom), 1)} mm`,
+  ]);
   const speed = t.linearOutput ? `${fmt(toMm(Math.abs(s.omegaMotor / t.ratio)), 2)} mm/s` : `${fmt(toRpm(s.omegaOut), 2)} tr/min`;
 
   return `<!doctype html>
@@ -57,6 +64,10 @@ ul{margin:4px 0;padding-left:18px} @media print{body{margin:10mm}}
 
 <h2>Engrènements</h2>
 <table><tr><th>Couple</th><th>Entraxe</th><th>αw</th><th>εα</th><th>εβ</th></tr>${rows(meshRows)}</table>
+
+${asm.shafts.length ? `<h2>Montage sur tiges</h2>
+<table><tr><th>Arbre</th><th>Roues (face inférieure)</th><th>Tige</th></tr>${rows(shaftRows)}</table>
+<p class="muted">${p.assembly.rodMode === 'fixed' ? 'Tiges fixes, roues libres' : 'Tiges tournantes, roues serrées'} ; hauteur entre flasques ${fmt(toMm(asm.innerHeight), 2)} mm${asm.plates[0] ? `, flasques ${fmt(toMm(asm.plates[0].width), 1)} × ${fmt(toMm(asm.plates[0].height), 1)} × ${fmt(toMm(asm.plates[0].thickness), 1)} mm` : ''}.</p>` : ''}
 
 <h2>Rapport et performances</h2>
 <table>${rows([

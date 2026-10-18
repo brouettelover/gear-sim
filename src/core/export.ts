@@ -42,6 +42,14 @@ export function extrudeShape(shape: Shape, spec: GearSpec, geo: GearGeometry): M
     slices = Math.max(8, Math.ceil(total / ((2 * Math.PI) / 180)));
     if (spec.type === 'herringbone' && slices % 2) slices++;
   }
+  return extrudeTwisted(shape, b, slices, (h) => twistAt(spec, geo, h));
+}
+
+/** Prisme droit (flasque, tige, entretoise) de hauteur h (m), en mm. */
+export const extrudePrism = (shape: Shape, h: number): Mesh3D => extrudeTwisted(shape, h, 1, () => 0);
+
+/** Extrusion d'une forme sur une hauteur b (m), tournée de twist(h) à la hauteur h. */
+function extrudeTwisted(shape: Shape, b: number, slices: number, twist: (h: number) => number): Mesh3D {
   const rings = [shape.outer, ...shape.holes];
   const ringSizes = rings.map((r) => r.length);
   const perLayer = ringSizes.reduce((a, n) => a + n, 0);
@@ -49,7 +57,7 @@ export function extrudeShape(shape: Shape, spec: GearSpec, geo: GearGeometry): M
   const pos = new Float32Array(perLayer * (slices + 1) * 3);
   for (let s = 0; s <= slices; s++) {
     const h = (b * s) / slices;
-    const a = twistAt(spec, geo, h);
+    const a = twist(h);
     const c = Math.cos(a);
     const sn = Math.sin(a);
     for (let i = 0; i < perLayer; i++) {
@@ -101,6 +109,45 @@ export function extrudeShape(shape: Shape, spec: GearSpec, geo: GearGeometry): M
     idx.push(top + oriented[t], top + oriented[t + 1], top + oriented[t + 2]);
   }
   return { positions: pos, indices: new Uint32Array(idx) };
+}
+
+/** Copie d'un maillage tourné de `angle` autour de z puis translaté (mm). */
+export function placeMesh(m: Mesh3D, angle: number, dx: number, dy: number, dz: number): Mesh3D {
+  const c = Math.cos(angle), sn = Math.sin(angle);
+  const P = new Float32Array(m.positions.length);
+  for (let i = 0; i < P.length; i += 3) {
+    const x = m.positions[i], y = m.positions[i + 1];
+    P[i] = x * c - y * sn + dx;
+    P[i + 1] = x * sn + y * c + dy;
+    P[i + 2] = m.positions[i + 2] + dz;
+  }
+  return { positions: P, indices: m.indices };
+}
+
+/** Réunit plusieurs maillages en un seul (coques juxtaposées, sans union booléenne). */
+export function mergeMeshes(list: Mesh3D[]): Mesh3D {
+  const nv = list.reduce((a, m) => a + m.positions.length, 0);
+  const ni = list.reduce((a, m) => a + m.indices.length, 0);
+  const P = new Float32Array(nv);
+  const I = new Uint32Array(ni);
+  let pv = 0, pi = 0;
+  for (const m of list) {
+    P.set(m.positions, pv);
+    const base = pv / 3;
+    for (let k = 0; k < m.indices.length; k++) I[pi + k] = m.indices[k] + base;
+    pv += m.positions.length;
+    pi += m.indices.length;
+  }
+  return { positions: P, indices: I };
+}
+
+/** Disque percé (entretoise) ou disque plein si bore = 0 ; rayons en m. */
+export function ringShape(r: number, bore = 0, n = 64): Shape {
+  const ring = (R: number, cw: boolean) => Array.from({ length: n }, (_, i) => {
+    const t = ((cw ? -1 : 1) * i * 2 * Math.PI) / n;
+    return { x: R * Math.cos(t), y: R * Math.sin(t) };
+  });
+  return { outer: ring(r, false), holes: bore > 0 ? [ring(bore, true)] : [] };
 }
 
 /** STL binaire (little-endian) à partir d'un maillage en mm. */

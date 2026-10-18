@@ -27,6 +27,8 @@ export type Placement =
 export interface TrainGear {
   gear: GearSpec;
   placement: Placement;
+  /** décalage axial (m) ajouté à la position automatique, voir assembly.ts */
+  axialOffset?: number;
 }
 
 export interface ChainSpec {
@@ -224,21 +226,8 @@ export function analyzeChain(chain: ChainSpec, print: PrintSettings, materials: 
   for (let n: TrainNode | undefined = out; n; n = n.parentId ? nodes.get(n.parentId) : undefined) n.onPath = true;
   for (const m of meshes) m.loaded = nodes.get(m.a)!.onPath && nodes.get(m.b)!.onPath;
 
-  // collisions entre roues d'un même plan qui n'engrènent pas
+  // les collisions dépendent des positions axiales : elles sont vérifiées par analyzeAssembly
   const list = [...nodes.values()];
-  const meshed = new Set(meshes.map((m) => [m.a, m.b].sort().join('|')));
-  for (let i = 0; i < list.length; i++) {
-    for (let j = i + 1; j < list.length; j++) {
-      const A = list[i];
-      const B = list[j];
-      if (A.layer !== B.layer || meshed.has([A.id, B.id].sort().join('|'))) continue;
-      if (A.geo.kind !== 'external' || B.geo.kind !== 'external') continue;
-      const d = Math.hypot(A.x - B.x, A.y - B.y);
-      if (d < A.geo.ra + B.geo.ra) {
-        warnings.push({ severity: 'error', message: `Collision entre « ${A.spec.name} » et « ${B.spec.name} » (même plan). Changez l'angle de placement ou passez une roue sur un autre arbre.` });
-      }
-    }
-  }
 
   const efficiency = meshEfficiency ** out.meshesFromMotor;
   let gearInertia = 0;
@@ -378,7 +367,11 @@ export interface GearLoad {
  * Efforts sur chaque roue pour un couple moteur T_m (N·m, arbre moteur) et une vitesse ω_m.
  * Couple d'un arbre : T = T_m·|ω_m/ω|·η^k (k engrènements en amont).
  */
-export function gearLoads(t: TrainAnalysis, motorTorque: number, omegaMotor: number, meshEfficiency: number): GearLoad[] {
+export function gearLoads(
+  t: TrainAnalysis, motorTorque: number, omegaMotor: number, meshEfficiency: number,
+  /** largeur réellement en prise par engrènement (clé `${a}|${b}`), voir assembly.ts */
+  overlap: Record<string, number> = {},
+): GearLoad[] {
   const loads = new Map<string, GearLoad>();
   const byId = new Map(t.nodes.map((n) => [n.id, n]));
   const put = (id: string, ft: number, v: number, width: number) => {
@@ -409,7 +402,7 @@ export function gearLoads(t: TrainAnalysis, motorTorque: number, omegaMotor: num
     const shaftT = d.ratio !== 0 ? (T / Math.abs(d.ratio)) * meshEfficiency ** d.meshesFromMotor : 0;
     const ft = shaftT / d.geo.r;
     const v = Math.abs(d.ratio) * W * d.geo.r;
-    const width = Math.min(d.spec.faceWidth, other.spec.faceWidth);
+    const width = Math.min(d.spec.faceWidth, other.spec.faceWidth, overlap[`${m.a}|${m.b}`] ?? Infinity);
     put(d.id, ft, v, width);
     put(other.id, ft, v, width);
   }

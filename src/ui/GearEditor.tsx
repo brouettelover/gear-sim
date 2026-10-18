@@ -5,6 +5,7 @@ import type { Computed, Project } from '../core/project';
 import type { BoreType, GearSpec, GearType } from '../core/types';
 import { DEG, MM, fmt, toMm } from '../core/units';
 import { inv } from '../core/involute';
+import { rodBoreDiameter } from '../core/assembly';
 import type { Updater } from './App';
 import { projectGears } from './App';
 import { CheckField, NumField, Section, SelectField, Stat, TextField } from './fields';
@@ -101,7 +102,16 @@ export function GearEditor({ project, computed, update, selectedId, onSelect }: 
         )}
       </Section>
 
-      {g.kind === 'external' && (
+      {g.kind === 'external' && computed.assembly.rodGearIds.includes(gear.id) && (
+        <Section title="Alésage">
+          <p className="muted small">
+            Imposé par le montage sur tige : rond Ø {fmt(toMm(rodBoreDiameter(project.assembly)), 2)} mm
+            {project.assembly.rodMode === 'fixed' ? ' (tige + jeu de rotation, la roue tourne sur la tige)' : ' (serré sur la tige tournante)'}, plus la compensation d'impression.
+            Réglage dans l'onglet Train, section « Montage 3D ».
+          </p>
+        </Section>
+      )}
+      {g.kind === 'external' && !computed.assembly.rodGearIds.includes(gear.id) && (
         <Section title="Alésage">
           <div className="grid2">
             <SelectField label="Forme" value={gear.bore.type} options={BORE_LABELS} onChange={(v) => set((s) => void (s.bore.type = v))} />

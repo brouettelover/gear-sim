@@ -4,9 +4,10 @@
 import type { Computed, Project } from '../core/project';
 import { defaultGear, newId } from '../core/project';
 import { describeRatio, directionLabel, type Placement, type PlanetaryMember } from '../core/train';
-import { DEG, fmt, toMm, toRpm } from '../core/units';
+import { suggestMeshGear, type AssemblySpec } from '../core/assembly';
+import { DEG, MM, fmt, toMm, toRpm } from '../core/units';
 import type { Updater } from './App';
-import { NumField, Section, SelectField, Stat } from './fields';
+import { CheckField, NumField, Section, SelectField, Stat } from './fields';
 
 interface Props {
   project: Project;
@@ -40,10 +41,12 @@ export function TrainPanel({ project, computed, update, selectedId, onSelect }: 
       </Section>
 
       {project.mode === 'chain' ? (
-        <ChainEditor project={project} update={update} selectedId={selectedId} onSelect={onSelect} />
+        <ChainEditor project={project} computed={computed} update={update} selectedId={selectedId} onSelect={onSelect} />
       ) : (
         <PlanetaryEditor project={project} update={update} />
       )}
+
+      <AssemblyEditor project={project} computed={computed} update={update} selectedId={selectedId} />
 
       <Section title="Résultats cinématiques">
         <div className="grid2 stats">
@@ -62,7 +65,7 @@ export function TrainPanel({ project, computed, update, selectedId, onSelect }: 
             <tr>
               <th>Roue</th>
               <th>z</th>
-              <th>Arbre / plan</th>
+              <th>Position axiale</th>
               <th>Vitesse</th>
               <th>Sens</th>
             </tr>
@@ -72,7 +75,7 @@ export function TrainPanel({ project, computed, update, selectedId, onSelect }: 
               <tr key={n.id} className={n.id === selectedId ? 'selected' : ''} onClick={() => onSelect(n.id)}>
                 <td>{n.spec.name}{n.count > 1 ? ` (×${n.count})` : ''}</td>
                 <td>{n.geo.z}</td>
-                <td>{n.geo.kind === 'rack' ? '—' : `plan ${n.layer}`}</td>
+                <td>{`z ${fmt(toMm(computed.assembly.placed[n.id]?.z ?? 0), 2)} mm`}</td>
                 <td>{n.geo.kind === 'rack' ? `${fmt(toMm(Math.abs(n.ratio * omega)), 1)} mm/s` : `${fmt(Math.abs(toRpm(n.ratio * omega)), 1)} tr/min`}</td>
                 <td>{n.geo.kind === 'rack' ? '—' : directionLabel(n.ratio)}</td>
               </tr>
@@ -102,7 +105,7 @@ export function TrainPanel({ project, computed, update, selectedId, onSelect }: 
   );
 }
 
-function ChainEditor({ project, update, selectedId, onSelect }: { project: Project; update: Updater; selectedId?: string; onSelect: (id: string) => void }) {
+function ChainEditor({ project, computed, update, selectedId, onSelect }: { project: Project; computed: Computed; update: Updater; selectedId?: string; onSelect: (id: string) => void }) {
   const gears = project.chain.gears;
   const sel = gears.find((g) => g.gear.id === selectedId) ?? gears[0];
 
@@ -125,7 +128,16 @@ function ChainEditor({ project, update, selectedId, onSelect }: { project: Proje
       });
       // nouvelle roue : on l'écarte des roues déjà placées autour de la roue menante
       const used = d.chain.gears.filter((x) => x.placement.kind === 'mesh' && x.placement.parent === parent.id).length;
-      const placement: Placement = kind === 'mesh' ? { kind: 'mesh', parent: parent.id, angle: (used * 120 * Math.PI) / 180 } : { kind: 'coaxial', parent: parent.id };
+      // direction préférée : dans le prolongement de l'arbre moteur vers la roue menante, puis une place libre
+      const pn = computed.train.nodes.find((n) => n.id === parent.id);
+      const preferred = pn && Math.hypot(pn.x, pn.y) > 1e-9 ? Math.atan2(pn.y, pn.x) : (used * 120 * Math.PI) / 180;
+      let angle = 0;
+      if (kind === 'mesh') {
+        const sug = suggestMeshGear(computed.train, computed.assembly, parent.id, g, d.print, d.assembly.rodDiameter / 2, preferred);
+        angle = sug.angle;
+        g.teeth = sug.teeth;
+      }
+      const placement: Placement = kind === 'mesh' ? { kind: 'mesh', parent: parent.id, angle } : { kind: 'coaxial', parent: parent.id };
       d.chain.gears.push({ gear: g, placement });
       d.chain.outputId = g.id;
       setTimeout(() => onSelect(g.id));
@@ -204,7 +216,7 @@ function ChainEditor({ project, update, selectedId, onSelect }: { project: Proje
         </div>
       )}
       <SelectField label="Arbre de sortie" value={project.chain.outputId} options={gears.map((g) => ({ value: g.gear.id, label: g.gear.name }))} onChange={(v) => update((d) => void (d.chain.outputId = v))} />
-      <p className="muted small">Une roue sur le même arbre est placée dans le plan suivant : c'est ainsi qu'on construit un train composé.</p>
+      <p className="muted small">Une roue sur le même arbre est placée dans le plan suivant : c'est ainsi qu'on construit un train composé. Chaque arbre autre que celui du moteur est une tige (section « Montage 3D »).</p>
     </Section>
   );
 }
@@ -229,6 +241,91 @@ function PlanetaryEditor({ project, update }: { project: Project; update: Update
       )}
       <p className="muted small">
         Module et angle de pression se règlent dans l'onglet Engrenage (communs aux trois roues). Satellites sans déport, couronne à denture droite.
+      </p>
+    </Section>
+  );
+}
+
+const ROD_PRESETS = [2, 3, 4, 5, 8];
+
+function AssemblyEditor({ project, computed, update, selectedId }: { project: Project; computed: Computed; update: Updater; selectedId?: string }) {
+  const a = project.assembly;
+  const asm = computed.assembly;
+  const set = (fn: (s: AssemblySpec) => void) => update((d) => fn(d.assembly));
+  if (project.mode === 'planetary') {
+    return (
+      <Section title="Montage 3D">
+        {asm.notes.map((n) => <p key={n} className="muted small">{n}</p>)}
+      </Section>
+    );
+  }
+  const sel = project.chain.gears.find((g) => g.gear.id === selectedId) ?? project.chain.gears[0];
+  const nodeName = (id: string) => computed.train.nodes.find((n) => n.id === id)?.spec.name ?? id;
+  return (
+    <Section title="Montage 3D (tiges et flasques)">
+      <div className="grid2">
+        <NumField label={`Position axiale de « ${sel.gear.name} » : décalage`} value={sel.axialOffset ?? 0} factor={MM} unit="mm" step={0.5} digits={2}
+          onChange={(v) => update((d) => {
+            const g = d.chain.gears.find((x) => x.gear.id === sel.gear.id);
+            if (g) g.axialOffset = v || undefined;
+          })}
+          hint="Ajouté à la position automatique ; les roues qui en dépendent suivent" />
+        <Stat label="Face inférieure (z)" value={fmt(toMm(asm.placed[sel.gear.id]?.z ?? 0), 2)} unit="mm" />
+      </div>
+      <div className="grid2">
+        <NumField label="Diamètre des tiges" value={a.rodDiameter} factor={MM} unit="mm" min={1} step={0.5} digits={2} onChange={(v) => set((s) => void (s.rodDiameter = v))} />
+        <SelectField<AssemblySpec['rodMode']>
+          label="Montage"
+          value={a.rodMode}
+          options={[
+            { value: 'fixed', label: 'Tiges fixes, roues libres' },
+            { value: 'rotating', label: 'Tiges tournantes, roues serrées' },
+          ]}
+          onChange={(v) => set((s) => void (s.rodMode = v))}
+        />
+      </div>
+      <div className="chips">
+        {ROD_PRESETS.map((d) => (
+          <button key={d} className={Math.abs(a.rodDiameter - d * MM) < 1e-9 ? 'chip active' : 'chip'} onClick={() => set((s) => void (s.rodDiameter = d * MM))}>Ø {d}</button>
+        ))}
+      </div>
+      <div className="grid2">
+        <NumField label="Jeu de rotation (diamètre)" value={a.runningClearance} factor={MM} unit="mm" step={0.05} digits={2} min={0} onChange={(v) => set((s) => void (s.runningClearance = v))} hint="Roue libre sur tige fixe, ou tige tournante dans le flasque" />
+        <NumField label="Jeu entre plans de roues" value={a.layerGap} factor={MM} unit="mm" step={0.1} digits={2} min={0} onChange={(v) => set((s) => void (s.layerGap = v))} />
+        <NumField label="Jeu roues / flasques" value={a.plateGap} factor={MM} unit="mm" step={0.1} digits={2} min={0} onChange={(v) => set((s) => void (s.plateGap = v))} />
+        <NumField label="Épaisseur des flasques" value={a.plateThickness} factor={MM} unit="mm" step={0.5} digits={2} min={0.5} onChange={(v) => set((s) => void (s.plateThickness = v))} />
+        <NumField label="Marge des flasques" value={a.plateMargin} factor={MM} unit="mm" step={0.5} digits={2} min={0} onChange={(v) => set((s) => void (s.plateMargin = v))} />
+        <NumField label="Longueur de l'arbre moteur" value={a.motorShaftLength} factor={MM} unit="mm" step={0.5} digits={2} min={1} onChange={(v) => set((s) => void (s.motorShaftLength = v))} hint="Depuis la face de fixation du moteur (N20 : souvent 10 mm)" />
+        <NumField label="Passage de l'arbre moteur" value={a.motorHole} factor={MM} unit="mm" step={0.5} digits={2} min={1} onChange={(v) => set((s) => void (s.motorHole = v))} hint="Trou du flasque inférieur : à mesurer sur votre moteur (bossage du palier)" />
+      </div>
+      <CheckField label="Alésage des roues imposé par la tige" checked={a.autoBores} onChange={(v) => set((s) => void (s.autoBores = v))} />
+      <table className="table">
+        <thead>
+          <tr>
+            <th>Arbre</th>
+            <th>Roues (de bas en haut)</th>
+            <th>Tige</th>
+          </tr>
+        </thead>
+        <tbody>
+          {asm.shafts.map((s) => (
+            <tr key={s.id}>
+              <td>{s.kind === 'motor' ? 'Moteur' : `Tige de « ${nodeName(s.rootGearId)} »`}</td>
+              <td>{s.gearIds.map(nodeName).join(', ')}</td>
+              <td>{s.kind === 'motor' ? `arbre Ø ${fmt(toMm(2 * s.radius), 1)} mm` : `Ø ${fmt(toMm(2 * s.radius), 1)} × ${fmt(toMm(s.zTo - s.zFrom), 1)} mm`}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="grid2 stats">
+        <Stat label="Hauteur entre flasques" value={fmt(toMm(asm.innerHeight), 2)} unit="mm" />
+        {asm.plates[0] && <Stat label="Flasques" value={`${fmt(toMm(asm.plates[0].width), 1)} × ${fmt(toMm(asm.plates[0].height), 1)}`} unit="mm" />}
+      </div>
+      {asm.notes.map((n) => <p key={n} className="muted small">{n}</p>)}
+      <p className="formula">
+        Position automatique (face inférieure) : roue moteur à z = jeu au flasque ; une roue qui engrène est dans le plan de sa menante ;
+        une roue coaxiale est au-dessus : z = z<sub>parent</sub> + b<sub>parent</sub> + jeu entre plans. Tige = hauteur entre flasques + 2 épaisseurs de flasque.
+        Collisions vérifiées entre roues dont les plans se recouvrent, et entre chaque roue et les tiges des autres arbres (jeu 0,2 mm).
       </p>
     </Section>
   );

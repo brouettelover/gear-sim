@@ -19,6 +19,16 @@ export const SIMPLIFICATIONS: { title: string; items: string[] }[] = [
     ],
   },
   {
+    title: 'Montage 3D',
+    items: [
+      'Collisions testées sur les encombrements (cercle de tête, jante de couronne, rectangle de crémaillère) au repos, pas sur le profil exact des dents.',
+      'Tiges, flasques et arbre moteur rigides ; aucun jeu axial ni radial pris en compte dans l\'engrènement.',
+      'Hélicoïdal : la phase des dents n\'est cohérente qu\'entre roues dont les faces inférieures sont au même niveau.',
+      'Pièces fusionnées : roues et entretoise juxtaposées dans un même fichier (coques qui se touchent, sans union booléenne) ; les trancheurs les réunissent.',
+      'Flasques rectangulaires sans fixation du moteur (vis) ni entretoises entre flasques : à ajouter selon votre moteur et votre châssis.',
+    ],
+  },
+  {
     title: 'Moteur et simulation',
     items: [
       'Moteur DC à paramètres constants : R ne varie pas avec la température, aimants stables.',

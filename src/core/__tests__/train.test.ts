@@ -57,20 +57,8 @@ describe('train composé', () => {
     outputId: 'b2',
   });
   it('rapport = produit des rapports d\'étage (4 × 4 = 16), même sens', () => expect(t.ratio).toBeCloseTo(16, 12));
-  it('les roues coaxiales sont dans des plans différents (pas de collision signalée)', () => {
-    expect(t.warnings.filter((w) => w.message.startsWith('Collision'))).toHaveLength(0);
+  it('les roues coaxiales sont sur le plan suivant', () => {
     expect(t.nodes.find((n) => n.id === 'p2')!.layer).toBe(1);
-  });
-  it('signale une collision entre roues d\'un même plan', () => {
-    const c = chain({
-      gears: [
-        { gear: spec({ id: 'a', teeth: 20 }), placement: { kind: 'root' } },
-        { gear: spec({ id: 'b', teeth: 20 }), placement: { kind: 'mesh', parent: 'a', angle: 0 } },
-        { gear: spec({ id: 'c', teeth: 20 }), placement: { kind: 'mesh', parent: 'b', angle: Math.PI + 0.3 } },
-      ],
-      outputId: 'c',
-    });
-    expect(c.warnings.some((w) => w.message.startsWith('Collision'))).toBe(true);
   });
   it('effort tangentiel : Ft = T_arbre / r, avec le rendement en amont', () => {
     const loads = new Map(gearLoads(t, 0.01, 100, 0.9).map((l) => [l.nodeId, l]));

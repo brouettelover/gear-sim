@@ -1,5 +1,6 @@
 /**
- * Vue 2D animée du train : engrènement synchronisé sur la vitesse simulée (avec ralenti),
+ * Vue animée du train, en 2D (SVG) ou en 3D (WebGL, voir View3D).
+ * 2D : engrènement synchronisé sur la vitesse simulée (avec ralenti),
  * zoom (molette), déplacement (glisser le fond), placement des roues (glisser une roue),
  * superpositions : cercles primitifs, ligne d'action, points de contact, entraxes, encombrement.
  */
@@ -11,6 +12,7 @@ import { fmt, toMm, toRpm } from '../core/units';
 import type { Updater } from './App';
 import { CheckField } from './fields';
 import { LEVEL_COLORS, shapePath } from './svg';
+import { View3D, type Show3D } from './View3D';
 
 interface Props {
   project: Project;
@@ -52,6 +54,9 @@ export function TrainView({ project, computed, update, selectedId, onSelect }: P
   const svgRef = useRef<SVGSVGElement>(null);
   const [slow, setSlow] = useState(-1); // log10 du facteur de ralenti
   const [playing, setPlaying] = useState(true);
+  const [mode, setMode] = useState<'2d' | '3d'>('2d');
+  const [show3d, setShow3d] = useState<Show3D>({ plates: true, rods: true, motor: true, safety: true });
+  const [fitSignal, setFitSignal] = useState(0);
   const [opts, setOpts] = useState({ pitch: true, base: false, action: true, contacts: true, dims: true, bbox: false, safety: true });
   const [theta, setTheta] = useState(0);
   const thetaRef = useRef(0);
@@ -113,7 +118,7 @@ export function TrainView({ project, computed, update, selectedId, onSelect }: P
     const prevent = (e: WheelEvent) => e.preventDefault();
     el.addEventListener('wheel', prevent, { passive: false });
     return () => el.removeEventListener('wheel', prevent);
-  }, []);
+  }, [mode]);
 
   const onPointerDown = (e: RPointerEvent, gearId?: string) => {
     (e.target as Element).setPointerCapture?.(e.pointerId);
@@ -186,8 +191,37 @@ export function TrainView({ project, computed, update, selectedId, onSelect }: P
         <span className="speed">
           Moteur : {fmt(toRpm(omega), 0)} tr/min → sortie : {train.linearOutput ? `${fmt(toMm(Math.abs(omega / train.ratio)), 1)} mm/s` : `${fmt(Math.abs(toRpm(omega / train.ratio)), 1)} tr/min`}
         </span>
-        <button onClick={() => setBox(fit())}>Recadrer</button>
+        <button onClick={() => (mode === '2d' ? setBox(fit()) : setFitSignal((k) => k + 1))}>Recadrer</button>
+        <span className="chips">
+          <button className={mode === '2d' ? 'chip active' : 'chip'} onClick={() => setMode('2d')}>2D</button>
+          <button className={mode === '3d' ? 'chip active' : 'chip'} onClick={() => setMode('3d')}>3D</button>
+        </span>
       </div>
+      {mode === '3d' ? (
+        <>
+          <div className="toolbar toggles">
+            <CheckField label="Flasques" checked={show3d.plates} onChange={(v) => setShow3d({ ...show3d, plates: v })} />
+            <CheckField label="Tiges et arbre moteur" checked={show3d.rods} onChange={(v) => setShow3d({ ...show3d, rods: v })} />
+            <CheckField label="Moteur" checked={show3d.motor} onChange={(v) => setShow3d({ ...show3d, motor: v })} />
+            <CheckField label="Couleur selon la résistance" checked={show3d.safety} onChange={(v) => setShow3d({ ...show3d, safety: v })} />
+          </div>
+          <View3D
+            train={train}
+            asm={computed.assembly}
+            poses={ps}
+            levels={new Map(computed.strength.map((x) => [x.node.id, x.level]))}
+            show={show3d}
+            selectedId={selectedId}
+            onSelect={onSelect}
+            fitSignal={fitSignal}
+          />
+          <p className="hint">
+            Glisser : tourner autour · Maj + glisser ou clic droit : déplacer · molette : zoom · clic : sélectionner. Positions axiales et tiges : onglet Train, section « Montage 3D ».
+            {selectedNode && ` Sélection : ${selectedNode.spec.name}, z = ${fmt(toMm(computed.assembly.placed[selectedNode.id]?.z ?? 0), 2)} mm.`}
+          </p>
+        </>
+      ) : (
+      <>
       <div className="toolbar toggles">
         <CheckField label="Cercles primitifs" checked={opts.pitch} onChange={(v) => setOpts({ ...opts, pitch: v })} />
         <CheckField label="Cercles de base" checked={opts.base} onChange={(v) => setOpts({ ...opts, base: v })} />
@@ -288,6 +322,8 @@ export function TrainView({ project, computed, update, selectedId, onSelect }: P
         Molette : zoom · glisser le fond : déplacer · {train.mode === 'chain' ? 'glisser une roue : la faire tourner autour de sa roue menante · ' : ''}clic : sélectionner.
         {selectedNode && ` Sélection : ${selectedNode.spec.name}, ${fmt(Math.abs(toRpm(selectedNode.ratio * omega)), 1)} tr/min.`}
       </p>
+      </>
+      )}
     </div>
   );
 }

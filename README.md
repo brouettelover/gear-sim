@@ -22,11 +22,17 @@ Onglets, avec la vue animée du train et la liste des vérifications toujours vi
    d'impression (jeu au flanc, jeu radial, compensation des alésages, buse) ; géométrie calculée et profil.
 2. **Train** : simple, composé (roues sur un même arbre, dans des plans différents) ou planétaire ;
    entraxes automatiques, placement en glissant les roues dans la vue ; rapport, sens et vitesse de chaque arbre, rendement.
+   **Montage 3D** : chaque arbre autre que celui du moteur est une tige (Ø réglable, tiges fixes et roues libres, ou tiges
+   tournantes et roues serrées) ; position axiale de chaque roue, flasques percés, vérification des collisions en 3D
+   (roues dont les plans se recouvrent, roue qui touche une tige, prise axiale, longueur de l'arbre moteur).
 3. **Moteur et charge** : préréglages N20 / 130 / 370 / 540 modifiables, paramètres identifiés, courbe
    couple-vitesse avec point de fonctionnement ; charge (couple, visqueux, inertie, poids sur tambour) ; régime permanent.
 4. **Simulation** : échelon, rampe ou PWM, intégration RK4, graphiques vitesse / courant / couples / puissances.
 5. **Résistance** : Lewis par roue en service et moteur bloqué, code couleur, matériaux modifiables, réglages d'impression conseillés.
-6. **Export** : STL, SVG et DXF de chaque pièce, fiche récapitulative imprimable.
+6. **Export** : STL, SVG et DXF de chaque pièce, roues d'une même tige fusionnées avec leur entretoise,
+   flasques (STL, SVG, DXF), longueurs de tiges à couper, STL de l'ensemble monté, fiche récapitulative imprimable.
+
+La vue de droite passe de 2D à 3D (WebGL 2, sans bibliothèque) : orbite, zoom, sélection d'une roue au clic.
 
 Les projets se sauvegardent automatiquement dans le navigateur (localStorage) et s'exportent / s'importent en JSON.
 
@@ -42,6 +48,7 @@ Les projets se sauvegardent automatiquement dans le navigateur (localStorage) et
 | `strength.ts` | Contrainte de Lewis et coefficient de sécurité |
 | `materials.ts` | PLA, PETG, ABS, ASA, PA, PA-CF, POM |
 | `export.ts` | STL (avec torsion hélicoïdale / chevron), SVG, DXF |
+| `assembly.ts` | Montage 3D : arbres, tiges, positions axiales, flasques, pièces fusionnées, collisions |
 | `contact.ts` | Ligne d'action et points de contact instantanés (affichage) |
 | `report.ts` | Fiche récapitulative HTML |
 | `project.ts` | Modèle de projet (JSON), calcul complet |
@@ -67,6 +74,10 @@ avec `J_eq = J_rotor + Σ J_roue·(ωᵢ/ω)² + J_charge/N²`, intégrées par 
 **Lewis** : `σ = Kv·Ft / (b·m·Y)`, `Kv = (3,05 + V)/3,05`, Y tabulé (Shigley) au nombre de dents
 virtuel `zv = z / cos³ β`. Coefficient de sécurité `n = σ_adm / σ` : vert ≥ 2, orange ≥ 1,25, rouge.
 
+**Montage** (z = 0 sur la face intérieure du flasque inférieur) : roue moteur à z = jeu au flasque, roue qui engrène
+dans le plan de sa menante, roue coaxiale à `z_parent + b_parent + jeu entre plans`, plus le décalage saisi.
+Tige = hauteur entre flasques + 2 épaisseurs. Alésage sur tige fixe = Ø tige + jeu de rotation (+ compensation d'impression).
+
 ## Simplifications du modèle
 
 - Rendement par engrènement constant (indépendant de la charge, de la vitesse et de la lubrification) ;
@@ -80,3 +91,5 @@ virtuel `zv = z / cos³ β`. Coefficient de sécurité `n = σ_adm / σ` : vert 
 - Moteur : paramètres constants (pas d'échauffement de R ni d'affaiblissement des aimants),
   frottement interne sec constant. PWM : bornes en court-circuit à l'état bas.
 - Hélicoïdal : le congé de pied est calculé dans le plan apparent avec le rayon d'outil normal.
+- Montage 3D : collisions testées sur les encombrements (cercles de tête), tiges et flasques rigides,
+  pas de fixation moteur ni d'entretoises entre flasques.

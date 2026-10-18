@@ -2,6 +2,7 @@
  * Projet : tout ce qui est sauvegardé (JSON / localStorage), valeurs par défaut,
  * et calcul complet (géométrie → train → moteur → régime permanent → résistance).
  */
+import { DEFAULT_ASSEMBLY, analyzeAssembly, applyRodBores, type Assembly, type AssemblySpec } from './assembly';
 import { DEFAULT_MATERIALS, type Material } from './materials';
 import { MOTOR_PRESETS, motorModel, type MotorModel, type MotorSpec } from './motor';
 import { steadyState, type Drivetrain, type LoadSpec, type SteadyState, type VoltageProfile } from './simulation';
@@ -29,6 +30,8 @@ export interface Project {
   motor: MotorSpec;
   load: LoadSpec;
   sim: SimSettings;
+  /** montage 3D sur tiges (train simple / composé) */
+  assembly: AssemblySpec;
 }
 
 let counter = 0;
@@ -84,6 +87,7 @@ export function defaultProject(): Project {
     motor: { ...MOTOR_PRESETS[1] },
     load: { constantTorque: 0, viscous: 0, inertia: 0, mass: 0.5, drumRadius: 10 * MM },
     sim: { profile: { kind: 'step', voltage: 6, delay: 0 }, duration: 0.3 },
+    assembly: { ...DEFAULT_ASSEMBLY },
   };
 }
 
@@ -99,6 +103,7 @@ export function parseProject(json: string): Project {
     load: { ...d.load, ...raw.load },
     sim: { ...d.sim, ...raw.sim },
     motor: { ...d.motor, ...raw.motor },
+    assembly: { ...d.assembly, ...raw.assembly },
     materials: Array.isArray(raw.materials) && raw.materials.length ? raw.materials : d.materials,
   };
   if (!Array.isArray(p.chain?.gears) || !p.chain.gears.length) throw new Error('Le projet ne contient aucun engrenage.');
@@ -117,6 +122,7 @@ export interface GearStrength {
 
 export interface Computed {
   train: TrainAnalysis;
+  assembly: Assembly;
   motor: MotorModel;
   drivetrain: Drivetrain;
   steady: SteadyState;
@@ -127,9 +133,12 @@ export interface Computed {
 
 /** Calcule l'ensemble des résultats d'un projet. */
 export function computeProject(p: Project): Computed {
+  // roues montées sur tige : alésage imposé par la tige
+  const rods = p.mode === 'chain' ? applyRodBores(p.chain, p.assembly) : { chain: p.chain, ids: [] };
   const train = p.mode === 'planetary'
     ? analyzePlanetary(p.planetary, p.print, p.materials, p.meshEfficiency)
-    : analyzeChain(p.chain, p.print, p.materials, p.meshEfficiency);
+    : analyzeChain(rods.chain, p.print, p.materials, p.meshEfficiency);
+  const assembly = analyzeAssembly(train, p.mode === 'chain' ? rods.chain : null, p.assembly, p.print, rods.ids);
   const motor = motorModel(p.motor);
   // sortie crémaillère : le "rapport" est ramené à l'arbre du pignon (charge vue par le pignon)
   let ratio = Math.abs(train.ratio);
@@ -141,8 +150,8 @@ export function computeProject(p: Project): Computed {
   const drivetrain: Drivetrain = { ratio: ratio || 1, efficiency: train.efficiency, gearInertia: train.gearInertia };
   const steady = steadyState(motor, drivetrain, p.load);
   const stallT = motor.Kt * (motor.V / motor.R) - motor.Tf;
-  const opLoads = new Map(gearLoads(train, steady.motorTorque, steady.omegaMotor, p.meshEfficiency).map((l) => [l.nodeId, l]));
-  const stLoads = new Map(gearLoads(train, stallT, 0, p.meshEfficiency).map((l) => [l.nodeId, l]));
+  const opLoads = new Map(gearLoads(train, steady.motorTorque, steady.omegaMotor, p.meshEfficiency, assembly.meshOverlap).map((l) => [l.nodeId, l]));
+  const stLoads = new Map(gearLoads(train, stallT, 0, p.meshEfficiency, assembly.meshOverlap).map((l) => [l.nodeId, l]));
   const strength: GearStrength[] = train.nodes.map((node) => {
     const op = opLoads.get(node.id) ?? { ft: 0, v: 0, width: node.spec.faceWidth };
     const st = stLoads.get(node.id) ?? { ft: 0, v: 0, width: node.spec.faceWidth };
@@ -151,7 +160,7 @@ export function computeProject(p: Project): Computed {
     return { node, operating, stall, level: safetyLevel(operating.safety), stallLevel: safetyLevel(stall.safety) };
   });
 
-  const warnings: Warning[] = [...train.warnings];
+  const warnings: Warning[] = [...train.warnings, ...assembly.warnings];
   for (const n of train.nodes) for (const w of n.warnings) warnings.push({ ...w, message: `${n.spec.name} : ${w.message}` });
   for (const m of train.meshes) {
     const a = train.nodes.find((n) => n.id === m.a)!.spec.name;
@@ -174,7 +183,7 @@ export function computeProject(p: Project): Computed {
     reminders.push(`${hot.map((n) => n.spec.name).join(', ')} en ${hot[0].material.name} sur l'arbre moteur : un moteur qui chauffe (souvent 50–70 °C au carter) fait fluer le PLA. Préférez PETG, ABS/ASA, PA ou POM près du moteur.`);
   }
   reminders.push('Imprimez les roues à plat (axe vertical) : les dents fléchissent alors dans le plan des couches. Imprimées sur la tranche, les dents travaillent en traction entre couches et cassent bien plus tôt.');
-  return { train, motor, drivetrain, steady, strength, warnings, reminders };
+  return { train, assembly, motor, drivetrain, steady, strength, warnings, reminders };
 }
 
 /** Réglages d'impression conseillés pour une roue. */
