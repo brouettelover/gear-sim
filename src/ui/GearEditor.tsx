@@ -6,6 +6,7 @@ import type { BoreType, GearSpec, GearType } from '../core/types';
 import { DEG, MM, fmt, toMm } from '../core/units';
 import { inv } from '../core/involute';
 import { rodBoreDiameter } from '../core/assembly';
+import { leadAngle } from '../core/worm';
 import type { Updater } from './App';
 import { projectGears } from './App';
 import { CheckField, NumField, Section, SelectField, Stat, TextField } from './fields';
@@ -18,6 +19,9 @@ const TYPE_LABELS: { value: GearType; label: string }[] = [
   { value: 'herringbone', label: 'Chevron' },
   { value: 'rack', label: 'Crémaillère' },
   { value: 'internal', label: 'Couronne intérieure' },
+  { value: 'bevel', label: 'Conique (renvoi à 90°)' },
+  { value: 'worm', label: 'Vis sans fin' },
+  { value: 'wormwheel', label: 'Roue de vis sans fin' },
 ];
 
 const BORE_LABELS: { value: BoreType; label: string }[] = [
@@ -56,6 +60,7 @@ export function GearEditor({ project, computed, update, selectedId, onSelect }: 
       }
     });
   const helix = gear.type === 'helical' || gear.type === 'herringbone';
+  const worm = gear.type === 'worm';
   const meshes = computed.train.meshes.filter((m) => m.a === gear.id || m.b === gear.id);
   const typeOptions = planetary ? TYPE_LABELS.filter((t) => (isRing ? t.value === 'internal' : t.value === 'spur')) : TYPE_LABELS;
 
@@ -75,11 +80,20 @@ export function GearEditor({ project, computed, update, selectedId, onSelect }: 
         <div className="grid2">
           <TextField label="Nom" value={gear.name} onChange={(v) => set((s) => void (s.name = v))} />
           <SelectField label="Type" value={gear.type} options={typeOptions} onChange={(v) => set((s) => void (s.type = v))} />
-          <NumField label="Module" value={gear.module} factor={MM} unit="mm" min={0.1} step={0.1} onChange={(v) => set((s) => void (s.module = v))} hint="Module normal mn = pas / π" />
-          <NumField label={g.kind === 'rack' ? 'Nombre de dents (longueur)' : 'Nombre de dents'} value={gear.teeth} integer min={3} max={400} onChange={(v) => set((s) => void (s.teeth = v))} />
+          <NumField label={worm || gear.type === 'wormwheel' ? 'Module axial' : gear.type === 'bevel' ? 'Module (au talon)' : 'Module'} value={gear.module} factor={MM} unit="mm" min={0.1} step={0.1} onChange={(v) => set((s) => void (s.module = v))} hint="Module normal mn = pas / π" />
+          <NumField label={g.kind === 'rack' ? 'Nombre de dents (longueur)' : worm ? 'Nombre de filets' : 'Nombre de dents'} value={gear.teeth} integer min={worm ? 1 : 3} max={worm ? 4 : 400} onChange={(v) => set((s) => void (s.teeth = v))} />
           <NumField label="Angle de pression" value={gear.pressureAngle} factor={DEG} unit="°" min={10} max={35} step={0.5} onChange={(v) => set((s) => void (s.pressureAngle = v))} />
-          <NumField label="Largeur" value={gear.faceWidth} factor={MM} unit="mm" min={0.5} onChange={(v) => set((s) => void (s.faceWidth = v))} />
-          {g.kind === 'external' && (
+          <NumField label={worm ? 'Longueur de la vis' : 'Largeur'} value={gear.faceWidth} factor={MM} unit="mm" min={0.5} onChange={(v) => set((s) => void (s.faceWidth = v))} hint={gear.type === 'bevel' ? 'Longueur de denture le long du cône (≤ R/3)' : undefined} />
+          {worm && (
+            <>
+              <NumField label="Coefficient diamétral q" value={gear.diameterFactor ?? 10} digits={2} min={4} max={30} step={1} onChange={(v) => set((s) => void (s.diameterFactor = v))} hint="Diamètre primitif de la vis = q × module ; q petit : filet plus incliné, meilleur rendement" />
+              <SelectField label="Sens du filet" value={gear.helixAngle < 0 ? 'left' : 'right'} options={[{ value: 'right', label: 'À droite' }, { value: 'left', label: 'À gauche' }]} onChange={(v) => set((s) => void (s.helixAngle = v === 'left' ? -1 : 1))} />
+            </>
+          )}
+          {gear.type === 'bevel' && (
+            <NumField label="Épaisseur du dos" value={gear.rimWidth} factor={MM} unit="mm" min={0} onChange={(v) => set((s) => void (s.rimWidth = v))} hint="Disque plein sous la denture, côté opposé au sommet du cône" />
+          )}
+          {g.kind === 'external' && !worm && gear.type !== 'wormwheel' && (
             <NumField label="Déport de profil x" value={gear.profileShift} digits={3} min={-1} max={1.5} step={0.05} onChange={(v) => set((s) => void (s.profileShift = v))} hint="Décalage de l'outil en multiples du module ; > 0 renforce les petits pignons" />
           )}
           {helix && (
@@ -148,6 +162,15 @@ export function GearEditor({ project, computed, update, selectedId, onSelect }: 
           {helix && <Stat label="Angle de pression apparent" value={fmt(g.alphaT / DEG, 3)} unit="°" />}
           {g.kind === 'external' && <Stat label="z mini sans dégagement" value={fmt(g.zMin, 1)} />}
           {g.kind === 'external' && <Stat label="Déport mini sans dégagement" value={fmt(g.xMin, 3)} />}
+          {node.solid.bevel && (
+            <>
+              <Stat label="Angle primitif δ" value={fmt(node.solid.bevel.delta / DEG, 2)} unit="°" />
+              <Stat label="Génératrice R" value={fmt(toMm(node.solid.bevel.coneDistance), 2)} unit="mm" />
+              <Stat label="Largeur / R" value={fmt(node.solid.bevel.widthRatio, 2)} tone={node.solid.bevel.widthRatio > 1 / 3 ? 'marginal' : 'ok'} />
+              <Stat label="Dents virtuelles zv = z / cos δ" value={fmt(node.solid.bevel.virtual.z, 1)} />
+            </>
+          )}
+          {worm && <Stat label="Angle du filet γ = atan(z/q)" value={fmt(leadAngle(gear) / DEG, 2)} unit="°" />}
           <Stat label="Masse (remplissage effectif)" value={fmt(node.mass * 1000, 2)} unit="g" />
           <Stat label="Inertie propre" value={fmt(node.inertia * 1e7, 3)} unit="g·cm²" />
         </div>
@@ -155,10 +178,17 @@ export function GearEditor({ project, computed, update, selectedId, onSelect }: 
           const other = computed.train.nodes.find((n) => n.id === (m.a === gear.id ? m.b : m.a))!;
           return (
             <div key={m.a + m.b} className="grid2 stats mesh-stats">
-              <Stat label={`Avec ${other.spec.name} : entraxe`} value={fmt(toMm(m.geo.centerDistance), 3)} unit="mm" />
+              {m.type === 'bevel' ? (
+                <Stat label={`Avec ${other.spec.name} : axes concourants`} value="90" unit="°" />
+              ) : (
+                <Stat label={`Avec ${other.spec.name} : entraxe`} value={fmt(toMm(m.geo.centerDistance), 3)} unit="mm" />
+              )}
+              {m.type === 'worm' && (
+                <Stat label="Rendement (vis menante / roue menante)" value={`${fmt(m.efficiency * 100, 0)} % / ${m.backEfficiency > 0 ? `${fmt(m.backEfficiency * 100, 0)} %` : 'irréversible'}`} />
+              )}
               <Stat label="Rapport de conduite εα" value={fmt(m.geo.contactRatio, 3)} tone={m.geo.contactRatio < 1.2 ? 'danger' : m.geo.contactRatio < 1.4 ? 'marginal' : 'ok'} />
               {m.geo.overlapRatio > 0 && <Stat label="Recouvrement εβ" value={fmt(m.geo.overlapRatio, 3)} />}
-              <Stat label="Angle de pression de fonctionnement" value={fmt(m.geo.alphaW / DEG, 3)} unit="°" />
+              {m.type === 'parallel' && <Stat label="Angle de pression de fonctionnement" value={fmt(m.geo.alphaW / DEG, 3)} unit="°" />}
             </div>
           );
         })}
@@ -176,6 +206,22 @@ export function GearEditor({ project, computed, update, selectedId, onSelect }: 
           le congé de pied est la trace de l'arrondi de l'outil (ρ = c*·m / (1 − sin α)), et le dégagement apparaît si z est trop faible.
           Le jeu au flanc amincit chaque dent de la moitié du jeu.
         </p>
+        {gear.type === 'bevel' && (
+          <p className="formula">
+            Conique droit, axes à 90° : tan δ₁ = z₁/z₂, génératrice R = d/(2 sin δ), saillie et creux au talon, dents réduites
+            linéairement vers le sommet du cône (largeur conseillée ≤ R/3). Profil au talon : roue droite virtuelle de Tredgold
+            (zv = z/cos δ, rayon r/cos δ) développée sur le cône complémentaire ; Lewis et conduite sont calculés sur cette roue virtuelle,
+            l'effort au rayon moyen r·(1 − b/2R). Vue de dessus : talon projeté.
+          </p>
+        )}
+        {(worm || gear.type === 'wormwheel') && (
+          <p className="formula">
+            Vis : diamètre d₁ = q·m, angle du filet tan γ = z₁/q ; roue : d₂ = z₂·m, entraxe a = (d₁ + d₂)/2, rapport z₂/z₁.
+            La vis est modélisée comme une roue hélicoïdale à z₁ dents d'angle 90° − γ (flancs en développante, type ZI), la roue comme
+            une roue hélicoïdale d'angle γ de même sens, sans gorge. Rendement (frottement μ = 0,2) : η = tan γ / tan(γ + φ'),
+            φ' = atan(μ/cos α) ; en sens inverse η' = tan(γ − φ')/tan γ, irréversible si γ ≤ φ'.
+          </p>
+        )}
       </Section>
     </div>
   );

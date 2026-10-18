@@ -45,11 +45,21 @@ export function extrudeShape(shape: Shape, spec: GearSpec, geo: GearGeometry): M
   return extrudeTwisted(shape, b, slices, (h) => twistAt(spec, geo, h));
 }
 
+/**
+ * Tronc de cône à section homothétique (roue conique) : le contour extérieur est réduit
+ * linéairement jusqu'à `scaleTop` en haut (arêtes dirigées vers le sommet du cône) ;
+ * les trous (alésage) gardent leur taille.
+ */
+export function extrudeTapered(shape: Shape, h: number, scaleTop: number): Mesh3D {
+  const outerN = shape.outer.length;
+  return extrudeTwisted(shape, h, 1, () => 0, (i, t) => (i < outerN ? 1 + (scaleTop - 1) * t : 1));
+}
+
 /** Prisme droit (flasque, tige, entretoise) de hauteur h (m), en mm. */
 export const extrudePrism = (shape: Shape, h: number): Mesh3D => extrudeTwisted(shape, h, 1, () => 0);
 
 /** Extrusion d'une forme sur une hauteur b (m), tournée de twist(h) à la hauteur h. */
-function extrudeTwisted(shape: Shape, b: number, slices: number, twist: (h: number) => number): Mesh3D {
+function extrudeTwisted(shape: Shape, b: number, slices: number, twist: (h: number) => number, scale: (i: number, t: number) => number = () => 1): Mesh3D {
   const rings = [shape.outer, ...shape.holes];
   const ringSizes = rings.map((r) => r.length);
   const perLayer = ringSizes.reduce((a, n) => a + n, 0);
@@ -63,8 +73,9 @@ function extrudeTwisted(shape: Shape, b: number, slices: number, twist: (h: numb
     for (let i = 0; i < perLayer; i++) {
       const p = flat[i];
       const o = (s * perLayer + i) * 3;
-      pos[o] = (p.x * c - p.y * sn) * MM_PER_M;
-      pos[o + 1] = (p.x * sn + p.y * c) * MM_PER_M;
+      const k = scale(i, s / slices) * MM_PER_M;
+      pos[o] = (p.x * c - p.y * sn) * k;
+      pos[o + 1] = (p.x * sn + p.y * c) * k;
       pos[o + 2] = h * MM_PER_M;
     }
   }

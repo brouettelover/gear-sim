@@ -35,6 +35,11 @@ export interface Drivetrain {
   ratio: number;
   /** rendement global du train (0–1) */
   efficiency: number;
+  /**
+   * rendement quand la charge entraîne le moteur (par défaut = efficiency) ; négatif pour un train
+   * irréversible (vis sans fin) : la charge freine au lieu d'entraîner
+   */
+  backEfficiency?: number;
   /** inertie des engrenages ramenée à l'arbre moteur (kg·m²) */
   gearInertia: number;
 }
@@ -49,7 +54,7 @@ export function reflectedLoad(l: LoadSpec, d: Drivetrain, omegaMotor: number): n
   const T = loadTorque(l, wOut);
   // la charge s'oppose au mouvement → le moteur fournit la puissance
   const motoring = T * (wOut >= 0 ? 1 : -1) >= 0;
-  return motoring ? T / (d.ratio * d.efficiency) : (T * d.efficiency) / d.ratio;
+  return motoring ? T / (d.ratio * d.efficiency) : (T * (d.backEfficiency ?? d.efficiency)) / d.ratio;
 }
 
 export const equivalentInertia = (m: MotorModel, d: Drivetrain, l: LoadSpec) =>

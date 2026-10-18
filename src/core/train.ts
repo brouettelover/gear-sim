@@ -12,9 +12,12 @@
  *
  * Rendement : η_engrènement^(nombre d'engrènements entre le moteur et la sortie), constant.
  */
-import { gearGeometry, gearWarnings, meshGeometry, type GearGeometry, type MeshGeometry } from './involute';
+import { bevelPair } from './bevel';
+import { gearSolid, type GearSolid } from './gearkinds';
+import { gearWarnings, meshGeometry, type GearGeometry, type MeshGeometry } from './involute';
+import { twistAt } from './export';
+import { wormPair } from './worm';
 import { findMaterial, type Material } from './materials';
-import { gearShape } from './profile';
 import { shapeArea, shapePolarMoment } from './geometry2d';
 import type { GearSpec, PrintSettings, Shape, Warning } from './types';
 import { fmt } from './units';
@@ -66,6 +69,19 @@ export interface TrainNode {
   rackShift?: number;
   /** nombre d'engrènements entre le moteur et cette roue */
   meshesFromMotor: number;
+  /** rendement cumulé du moteur jusqu'à cet arbre, et dans le sens inverse (charge menante ; ≤ 0 : irréversible) */
+  eff: number;
+  backEff: number;
+  /**
+   * groupe d'axes parallèles : 0 = axes parallèles à l'arbre moteur ; un renvoi conique ou une vis
+   * sans fin ouvre un nouveau groupe (x, y sont alors dans le repère de ce groupe, voir assembly.ts)
+   */
+  group: number;
+  /** racine d'un groupe : renvoi qui la relie à sa roue parente, angle de placement dans le groupe parent */
+  link?: { kind: 'bevel' | 'worm'; parent: string; angle: number; centerDistance: number };
+  /** hauteur axiale de la pièce (m) */
+  height: number;
+  solid: GearSolid;
   /** la roue transmet le couple du moteur vers la sortie */
   onPath: boolean;
   /** masse (kg) et inertie propre autour de son axe (kg·m²) */
@@ -88,6 +104,11 @@ export interface TrainMesh {
   /** direction du centre de a vers le point primitif (rad), au repos */
   gamma: number;
   loaded: boolean;
+  /** parallèle (droit, hélicoïdal, couronne, crémaillère), conique ou vis sans fin */
+  type: 'parallel' | 'bevel' | 'worm';
+  /** rendement de cet engrènement, dans le sens moteur → sortie et dans le sens inverse */
+  efficiency: number;
+  backEfficiency: number;
 }
 
 export interface TrainAnalysis {
@@ -101,6 +122,8 @@ export interface TrainAnalysis {
   /** pour une crémaillère en sortie : vitesse linéaire par rad/s moteur (m) */
   linearOutput: boolean;
   efficiency: number;
+  /** rendement quand la charge entraîne le moteur (≤ 0 : train irréversible) */
+  backEfficiency: number;
   /** inertie des engrenages ramenée à l'arbre moteur (kg·m²) */
   gearInertia: number;
   warnings: Warning[];
@@ -108,15 +131,20 @@ export interface TrainAnalysis {
   planetary?: { sun: number; ring: number; carrier: number; planet: number; spec: PlanetarySpec };
 }
 
-function nodeBase(spec: GearSpec, print: PrintSettings, materials: Material[]) {
-  const geo = gearGeometry(spec, print);
-  const shape = gearShape(geo, spec.bore, print.boreTolerance, spec.rimWidth);
+function nodeBase(spec: GearSpec, print: PrintSettings, materials: Material[], mate?: GearSpec) {
+  const solid = gearSolid(spec, mate, print);
+  const { geo, shape } = solid;
   const material = findMaterial(materials, spec.materialId);
   const rho = material.density * print.fillFactor;
-  const mass = rho * spec.faceWidth * shapeArea(shape);
-  const inertia = geo.kind === 'rack' ? 0 : rho * spec.faceWidth * shapePolarMoment(shape);
-  return { geo, shape, material, mass, inertia, warnings: gearWarnings(spec, geo, print) };
+  // conique : section du talon sur toute la hauteur (approximation par excès)
+  const mass = rho * solid.height * shapeArea(shape);
+  const inertia = geo.kind === 'rack' ? 0 : rho * solid.height * shapePolarMoment(shape);
+  const warnings = spec.type === 'worm' ? [] : gearWarnings(solid.cut, geo, print);
+  return { geo, shape, material, mass, inertia, warnings, solid, height: solid.height, group: 0, eff: 1, backEff: 1 };
 }
+
+/** Écart angulaire ramené dans ]−p/2, p/2]. */
+const wrapSym = (a: number, p: number) => a - Math.round(a / p) * p;
 
 const wrap = (a: number, period: number) => a - Math.floor(a / period) * period;
 
@@ -128,7 +156,7 @@ export function analyzeChain(chain: ChainSpec, print: PrintSettings, materials: 
   const byId = new Map(chain.gears.map((g) => [g.gear.id, g]));
   const root = chain.gears.find((g) => g.placement.kind === 'root') ?? chain.gears[0];
   if (!root) {
-    return { mode: 'chain', nodes: [], meshes: [], motorId: '', outputId: '', ratio: 1, linearOutput: false, efficiency: 1, gearInertia: 0, warnings: [{ severity: 'error', message: 'Le train est vide.' }] };
+    return { mode: 'chain', nodes: [], meshes: [], motorId: '', outputId: '', ratio: 1, linearOutput: false, efficiency: 1, backEfficiency: 1, gearInertia: 0, warnings: [{ severity: 'error', message: 'Le train est vide.' }] };
   }
 
   // parcours en largeur depuis la roue moteur
@@ -142,7 +170,19 @@ export function analyzeChain(chain: ChainSpec, print: PrintSettings, materials: 
     }
     children.set(p, [...(children.get(p) ?? []), g]);
   }
-  const rb = nodeBase(root.gear, print, materials);
+  // partenaire des roues dont la géométrie dépend de l'autre roue (coniques, vis et roue)
+  const special = (a: GearSpec, b: GearSpec) =>
+    (a.type === 'bevel' && b.type === 'bevel') || (a.type === 'worm' && b.type === 'wormwheel') || (a.type === 'wormwheel' && b.type === 'worm');
+  const mates = new Map<string, GearSpec>();
+  for (const g of chain.gears) {
+    if (g.placement.kind !== 'mesh') continue;
+    const pg = byId.get(g.placement.parent)?.gear;
+    if (!pg || !special(pg, g.gear)) continue;
+    if (!mates.has(g.gear.id)) mates.set(g.gear.id, pg);
+    if (!mates.has(pg.id)) mates.set(pg.id, g.gear);
+  }
+  let groups = 0;
+  const rb = nodeBase(root.gear, print, materials, mates.get(root.gear.id));
   if (rb.geo.kind !== 'external') warnings.push({ severity: 'error', message: 'La roue sur l\'arbre moteur doit être une roue extérieure.' });
   nodes.set(root.gear.id, {
     id: root.gear.id, spec: root.gear, ...rb, x: 0, y: 0, layer: 0, ratio: 1, phase: 0,
@@ -154,7 +194,7 @@ export function analyzeChain(chain: ChainSpec, print: PrintSettings, materials: 
     const p = nodes.get(pid)!;
     for (const c of children.get(pid) ?? []) {
       if (nodes.has(c.gear.id)) continue;
-      const base = nodeBase(c.gear, print, materials);
+      const base = nodeBase(c.gear, print, materials, mates.get(c.gear.id));
       const pl = c.placement as Exclude<Placement, { kind: 'root' }>;
       let node: TrainNode;
       if (pl.kind === 'coaxial') {
@@ -163,6 +203,55 @@ export function analyzeChain(chain: ChainSpec, print: PrintSettings, materials: 
           continue;
         }
         node = { id: c.gear.id, spec: c.gear, ...base, x: p.x, y: p.y, layer: p.layer + 1, ratio: p.ratio, phase: p.phase, meshesFromMotor: p.meshesFromMotor, onPath: false, count: 1, parentId: pid };
+      } else if (special(p.spec, c.gear) || ['bevel', 'worm', 'wormwheel'].includes(p.spec.type) || ['bevel', 'worm', 'wormwheel'].includes(c.gear.type)) {
+        // renvoi d'angle : la roue fille ouvre un nouveau groupe d'axes (repère calculé par assembly.ts)
+        if (!special(p.spec, c.gear)) {
+          warnings.push({ severity: 'error', message: `« ${c.gear.name} » : une roue conique n'engrène qu'avec une roue conique, une vis sans fin qu'avec sa roue.` });
+          continue;
+        }
+        const phi = pl.angle;
+        const common = { id: c.gear.id, spec: c.gear, ...base, x: 0, y: 0, layer: 0, meshesFromMotor: p.meshesFromMotor + 1, onPath: false, count: 1, parentId: pid, group: ++groups };
+        if (c.gear.type === 'bevel') {
+          const pair = bevelPair(p.spec, c.gear, print);
+          const zp = p.spec.teeth, zc = c.gear.teeth;
+          // contact : angle φ dans le repère du parent, angle π dans celui de la fille (voir assembly.ts)
+          const phase = Math.PI + Math.PI / zc - (zp / zc) * (p.phase - phi);
+          node = { ...common, ratio: (-p.ratio * zp) / zc, phase: wrap(phase, (2 * Math.PI) / zc), link: { kind: 'bevel', parent: pid, angle: phi, centerDistance: 0 } };
+          for (const w of pair.warnings) warnings.push({ ...w, message: `${p.spec.name} / ${c.gear.name} : ${w.message}` });
+          meshes.push({ a: pid, b: c.gear.id, driver: pid, geo: pair.mesh, gamma: phi, loaded: false, type: 'bevel', efficiency: meshEfficiency, backEfficiency: meshEfficiency });
+        } else {
+          const wormIsParent = p.spec.type === 'worm';
+          const worm = wormIsParent ? p.spec : c.gear;
+          const wheel = wormIsParent ? c.gear : p.spec;
+          const pair = wormPair(worm, wheel, print);
+          const hand = worm.helixAngle < 0 ? -1 : 1;
+          const z1 = worm.teeth, z2 = wheel.teeth;
+          const W = wormIsParent ? p : base;
+          const G = wormIsParent ? base : p;
+          const bW = W.solid.height, bG = G.solid.height;
+          const kappa = Math.tan(W.solid.cut.helixAngle) / W.geo.r;
+          const px = Math.PI * worm.module;
+          const twG = twistAt(G.solid.cut, G.geo, bG / 2);
+          let phase: number, ratio: number;
+          if (wormIsParent) {
+            // ω_roue·z2 = −h·ω_vis·z1 ; la roue présente une dent face à un creux du filet
+            ratio = (-hand * p.ratio * z1) / z2;
+            const sG = wrapSym((phi - p.phase) / kappa + px / 2 - bW / 2, px);
+            phase = wrap(sG / G.geo.r - twG, (2 * Math.PI) / z2);
+          } else {
+            ratio = (-hand * p.ratio * z2) / z1;
+            const sG = G.geo.r * wrapSym(p.phase + twG - phi, (2 * Math.PI) / z2);
+            phase = wrap(-kappa * (bW / 2 + sG - px / 2), (2 * Math.PI) / z1);
+          }
+          node = { ...common, ratio, phase, link: { kind: 'worm', parent: pid, angle: phi, centerDistance: pair.centerDistance } };
+          for (const w of pair.warnings) warnings.push({ ...w, message: `${worm.name} / ${wheel.name} : ${w.message}` });
+          const fwd = wormIsParent ? pair.efficiency.forward : pair.efficiency.backward;
+          const back = wormIsParent ? pair.efficiency.backward : pair.efficiency.forward;
+          if (!wormIsParent && fwd <= 0) {
+            warnings.push({ severity: 'error', message: `« ${wheel.name} » ne peut pas entraîner la vis « ${worm.name} » : le filet est irréversible (γ = ${fmt((pair.gamma * 180) / Math.PI, 1)}° ≤ angle de frottement).` });
+          }
+          meshes.push({ a: pid, b: c.gear.id, driver: pid, geo: { kind: 'external', centerDistance: pair.centerDistance, alphaW: worm.pressureAngle, contactRatio: pair.contactRatio, overlapRatio: 0, totalRatio: pair.contactRatio, pathLength: pair.contactRatio * pair.wheel.pb, warnings: [] }, gamma: phi, loaded: false, type: 'worm', efficiency: Math.max(fwd, 0), backEfficiency: back });
+        }
       } else {
         const g = pl.angle;
         const ux = Math.cos(g);
@@ -185,7 +274,7 @@ export function analyzeChain(chain: ChainSpec, print: PrintSettings, materials: 
           const zb = p.geo.z;
           const phase = g + (zb / za) * (p.phase - g);
           node = { id: c.gear.id, spec: c.gear, ...base, x: p.x + a * ux, y: p.y + a * uy, layer: p.layer, ratio: (p.ratio * zb) / za, phase: wrap(phase, (2 * Math.PI) / za), meshesFromMotor: p.meshesFromMotor + 1, onPath: false, count: 1, parentId: pid };
-          meshes.push({ a: c.gear.id, b: pid, driver: pid, geo: mg, gamma: g, loaded: false });
+          meshes.push({ a: c.gear.id, b: pid, driver: pid, geo: mg, gamma: g, loaded: false, type: 'parallel', efficiency: meshEfficiency, backEfficiency: meshEfficiency });
         } else {
           const mg = meshGeometry(p.geo, base.geo);
           const a = mg.centerDistance;
@@ -210,9 +299,14 @@ export function analyzeChain(chain: ChainSpec, print: PrintSettings, materials: 
               meshesFromMotor: p.meshesFromMotor + 1, onPath: false, count: 1, parentId: pid,
             };
           }
-          meshes.push({ a: pid, b: c.gear.id, driver: pid, geo: mg, gamma: g, loaded: false });
+          meshes.push({ a: pid, b: c.gear.id, driver: pid, geo: mg, gamma: g, loaded: false, type: 'parallel', efficiency: meshEfficiency, backEfficiency: meshEfficiency });
         }
       }
+      if (!node.link) node.group = p.group;
+      // rendement cumulé : celui de l'arbre parent × celui de l'engrènement (roue coaxiale : identique)
+      const m = meshes.find((x) => (x.a === pid && x.b === c.gear.id) || (x.b === pid && x.a === c.gear.id));
+      node.eff = p.eff * (pl.kind === 'mesh' && m ? m.efficiency : 1);
+      node.backEff = p.backEff * (pl.kind === 'mesh' && m ? m.backEfficiency : 1);
       nodes.set(c.gear.id, node);
       queue.push(c.gear.id);
     }
@@ -229,7 +323,8 @@ export function analyzeChain(chain: ChainSpec, print: PrintSettings, materials: 
   // les collisions dépendent des positions axiales : elles sont vérifiées par analyzeAssembly
   const list = [...nodes.values()];
 
-  const efficiency = meshEfficiency ** out.meshesFromMotor;
+  const efficiency = out.eff;
+  const backEfficiency = out.backEff;
   let gearInertia = 0;
   for (const n of nodes.values()) {
     if (n.geo.kind === 'rack') gearInertia += n.mass * n.ratio ** 2;
@@ -238,7 +333,7 @@ export function analyzeChain(chain: ChainSpec, print: PrintSettings, materials: 
   return {
     mode: 'chain', nodes: list, meshes, motorId: root.gear.id, outputId: out.id,
     ratio: 1 / out.ratio, linearOutput: out.geo.kind === 'rack',
-    efficiency, gearInertia, warnings,
+    efficiency, backEfficiency, gearInertia, warnings,
   };
 }
 
@@ -293,8 +388,8 @@ export function analyzePlanetary(ps: PlanetarySpec, print: PrintSettings, materi
     mode: 'planetary',
     nodes: [sunNode, planetNode, ringNode],
     meshes: [
-      { a: ps.sun.id, b: ps.planet.id, driver: ps.sun.id, geo: msp, gamma: 0, loaded: true },
-      { a: ps.planet.id, b: ps.ring.id, driver: ps.planet.id, geo: mpr, gamma: 0, loaded: true },
+      { a: ps.sun.id, b: ps.planet.id, driver: ps.sun.id, geo: msp, gamma: 0, loaded: true, type: 'parallel', efficiency: meshEfficiency, backEfficiency: meshEfficiency },
+      { a: ps.planet.id, b: ps.ring.id, driver: ps.planet.id, geo: mpr, gamma: 0, loaded: true, type: 'parallel', efficiency: meshEfficiency, backEfficiency: meshEfficiency },
     ],
     motorId: ps.input === 'sun' ? ps.sun.id : ps.input === 'ring' ? ps.ring.id : ps.sun.id,
     outputId: w.output === 'sun' ? ps.sun.id : w.output === 'ring' ? ps.ring.id : 'carrier',
@@ -302,6 +397,7 @@ export function analyzePlanetary(ps: PlanetarySpec, print: PrintSettings, materi
     linearOutput: false,
     // simplification : deux engrènements dans le chemin de puissance
     efficiency: meshEfficiency ** 2,
+    backEfficiency: meshEfficiency ** 2,
     gearInertia,
     warnings,
     planetary: { sun: w.sun, ring: w.ring, carrier: w.carrier, planet: w.planet, spec: ps },
@@ -368,7 +464,7 @@ export interface GearLoad {
  * Couple d'un arbre : T = T_m·|ω_m/ω|·η^k (k engrènements en amont).
  */
 export function gearLoads(
-  t: TrainAnalysis, motorTorque: number, omegaMotor: number, meshEfficiency: number,
+  t: TrainAnalysis, motorTorque: number, omegaMotor: number, _meshEfficiency: number,
   /** largeur réellement en prise par engrènement (clé `${a}|${b}`), voir assembly.ts */
   overlap: Record<string, number> = {},
 ): GearLoad[] {
@@ -399,12 +495,19 @@ export function gearLoads(
     if (!m.loaded) continue;
     const d = byId.get(m.driver)!;
     const other = byId.get(m.driver === m.a ? m.b : m.a)!;
-    const shaftT = d.ratio !== 0 ? (T / Math.abs(d.ratio)) * meshEfficiency ** d.meshesFromMotor : 0;
+    const width = Math.min(d.spec.faceWidth, other.spec.faceWidth, overlap[`${m.a}|${m.b}`] ?? Infinity);
+    // effort de contact : celui de la roue menante, Ft = T_arbre / r avec T_arbre = T_m·|ω_m/ω|·η (cumulé)
+    const shaftT = d.ratio !== 0 ? (T / Math.abs(d.ratio)) * d.eff : 0;
     const ft = shaftT / d.geo.r;
     const v = Math.abs(d.ratio) * W * d.geo.r;
-    const width = Math.min(d.spec.faceWidth, other.spec.faceWidth, overlap[`${m.a}|${m.b}`] ?? Infinity);
     put(d.id, ft, v, width);
-    put(other.id, ft, v, width);
+    if (m.type === 'worm' && other.ratio !== 0) {
+      // vis sans fin : l'effort tangentiel de la roue est l'effort axial de la vis (et réciproquement)
+      const tOther = (T / Math.abs(other.ratio)) * other.eff;
+      put(other.id, tOther / other.geo.r, Math.abs(other.ratio) * W * other.geo.r, width);
+    } else {
+      put(other.id, ft, v, width);
+    }
   }
   return [...loads.values()];
 }

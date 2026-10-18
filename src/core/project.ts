@@ -147,7 +147,7 @@ export function computeProject(p: Project): Computed {
     const pinion = train.nodes.find((n) => n.id === rack.parentId)!;
     ratio = Math.abs(1 / pinion.ratio);
   }
-  const drivetrain: Drivetrain = { ratio: ratio || 1, efficiency: train.efficiency, gearInertia: train.gearInertia };
+  const drivetrain: Drivetrain = { ratio: ratio || 1, efficiency: train.efficiency, backEfficiency: train.backEfficiency, gearInertia: train.gearInertia };
   const steady = steadyState(motor, drivetrain, p.load);
   const stallT = motor.Kt * (motor.V / motor.R) - motor.Tf;
   const opLoads = new Map(gearLoads(train, steady.motorTorque, steady.omegaMotor, p.meshEfficiency, assembly.meshOverlap).map((l) => [l.nodeId, l]));
@@ -169,6 +169,9 @@ export function computeProject(p: Project): Computed {
   }
   if (motor.ktKeMismatch > 0.15) {
     warnings.push({ severity: 'info', message: `Fiche moteur peu cohérente : Kt et Ke diffèrent de ${fmt(motor.ktKeMismatch * 100, 0)} % (ils devraient être égaux en SI).` });
+  }
+  if (train.backEfficiency <= 0 && train.efficiency > 0) {
+    warnings.push({ severity: 'info', message: 'Train irréversible (vis sans fin) : la charge ne peut pas faire tourner le moteur, elle reste en place moteur arrêté.' });
   }
   if (steady.stalled) warnings.push({ severity: 'error', message: 'Le moteur cale : la charge dépasse le couple disponible en sortie.' });
   else if (steady.stallMargin < 0.5) warnings.push({ severity: 'warning', message: `Point de fonctionnement à ${fmt((1 - steady.stallMargin) * 100, 0)} % du couple de blocage : le moteur va chauffer.` });

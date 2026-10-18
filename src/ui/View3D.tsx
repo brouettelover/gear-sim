@@ -4,8 +4,9 @@
  * Glisser : orbite · Maj + glisser ou clic droit : déplacer · molette : zoom · clic : sélection.
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { Assembly } from '../core/assembly';
-import { extrudePrism, extrudeShape, ringShape, type Mesh3D } from '../core/export';
+import { WORLD, toWorld, type Assembly, type Frame } from '../core/assembly';
+import { extrudePrism, ringShape, type Mesh3D } from '../core/export';
+import { solidMesh } from '../core/gearkinds';
 import type { SafetyLevel } from '../core/strength';
 import type { Pose, TrainAnalysis } from '../core/train';
 import { MM } from '../core/units';
@@ -37,6 +38,10 @@ const MOTOR_R = 6;
 const MOTOR_L = 25;
 const K = 1 / MM; // m → mm
 
+/** Matrice (mm) du repère d'un groupe d'axes. */
+const frameMatrix = (f: Frame) =>
+  new Float32Array([...f.u, 0, ...f.v, 0, ...f.w, 0, f.o[0] * K, f.o[1] * K, f.o[2] * K, 1]);
+
 interface Item { mesh: string; model: Float32Array; color: Vec3; alpha: number; pick?: string }
 
 export function View3D({ train, asm, poses, levels, show, selectedId, onSelect, fitSignal }: Props) {
@@ -49,14 +54,18 @@ export function View3D({ train, asm, poses, levels, show, selectedId, onSelect, 
   // encombrement de la scène (mm)
   const bounds = useMemo(() => {
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    let z0 = -MOTOR_L * MM, z1 = asm.innerHeight + 3 * MM;
     for (const n of train.nodes) {
       const r = n.geo.kind === 'rack' ? n.geo.z * n.geo.pt / 2 : n.geo.kind === 'internal' ? n.geo.rf + n.spec.rimWidth : n.geo.ra;
       const cx = n.geo.kind === 'rack' ? n.x + n.rackShift! * Math.cos(n.rackAngle!) : n.x;
       const cy = n.geo.kind === 'rack' ? n.y + n.rackShift! * Math.sin(n.rackAngle!) : n.y;
-      x0 = Math.min(x0, cx - r); x1 = Math.max(x1, cx + r);
-      y0 = Math.min(y0, cy - r); y1 = Math.max(y1, cy + r);
+      const p = asm.placed[n.id];
+      const c = toWorld(asm.groups[p?.group ?? 0] ?? WORLD, cx, cy, (p?.z ?? 0) + (p?.width ?? 0) / 2);
+      const R = Math.hypot(r, (p?.width ?? 0) / 2);
+      x0 = Math.min(x0, c[0] - R); x1 = Math.max(x1, c[0] + R);
+      y0 = Math.min(y0, c[1] - R); y1 = Math.max(y1, c[1] + R);
+      z0 = Math.min(z0, c[2] - R); z1 = Math.max(z1, c[2] + R);
     }
-    const z0 = -MOTOR_L * MM, z1 = asm.innerHeight + 3 * MM;
     return { c: [((x0 + x1) / 2) * K, ((y0 + y1) / 2) * K, ((z0 + z1) / 2) * K] as Vec3, r: (Math.max(x1 - x0, y1 - y0, z1 - z0) / 2) * K };
   }, [train, asm]);
 
@@ -102,7 +111,7 @@ export function View3D({ train, asm, poses, levels, show, selectedId, onSelect, 
     for (const m of meshes.current.values()) release(r, m);
     meshes.current.clear();
     const put = (key: string, m: Mesh3D) => meshes.current.set(key, upload(r, m));
-    for (const n of train.nodes) put(`g:${n.id}`, extrudeShape(n.shape, n.spec, n.geo));
+    for (const n of train.nodes) put(`g:${n.id}`, solidMesh(n.solid));
     for (const p of asm.parts) p.collars.forEach((c, i) => put(`c:${p.id}:${i}`, extrudePrism(ringShape(c.r, c.bore), c.h)));
     for (const s of asm.shafts) put(`s:${s.id}`, extrudePrism(ringShape(s.radius, 0, 24), s.zTo - s.zFrom));
     asm.plates.forEach((p, i) => put(`p:${i}`, extrudePrism(p.shape, p.thickness)));
@@ -119,6 +128,7 @@ export function View3D({ train, asm, poses, levels, show, selectedId, onSelect, 
     const lv: Record<SafetyLevel, Vec3> = { ok: col('--ok', [0.12, 0.54, 0.3]), marginal: col('--warn', [0.76, 0.48, 0]), danger: col('--danger', [0.75, 0.22, 0.17]) };
     const metal: Vec3 = [0.62, 0.65, 0.7];
     const out: Item[] = [];
+    const frameOf = (id: string) => frameMatrix(asm.groups[asm.placed[id]?.group ?? 0] ?? WORLD);
     const colorOf = (id: string): Vec3 => {
       if (id === selectedId) return accent;
       const l = levels.get(id);
@@ -127,13 +137,13 @@ export function View3D({ train, asm, poses, levels, show, selectedId, onSelect, 
     };
     for (const p of poses) {
       const z = asm.placed[p.nodeId]?.z ?? 0;
-      out.push({ mesh: `g:${p.nodeId}`, model: modelZ(p.angle, p.x * K, p.y * K, z * K), color: colorOf(p.nodeId), alpha: 1, pick: p.nodeId });
+      out.push({ mesh: `g:${p.nodeId}`, model: multiply(frameOf(p.nodeId), modelZ(p.angle, p.x * K, p.y * K, z * K)), color: colorOf(p.nodeId), alpha: 1, pick: p.nodeId });
     }
     for (const part of asm.parts) {
       const pose = poses.find((x) => x.nodeId === part.nodeIds[0]);
-      part.collars.forEach((c, i) => out.push({ mesh: `c:${part.id}:${i}`, model: modelZ(0, (pose?.x ?? 0) * K, (pose?.y ?? 0) * K, c.z * K), color: colorOf(part.nodeIds[0]), alpha: 1, pick: part.nodeIds[0] }));
+      part.collars.forEach((c, i) => out.push({ mesh: `c:${part.id}:${i}`, model: multiply(frameOf(part.nodeIds[0]), modelZ(0, (pose?.x ?? 0) * K, (pose?.y ?? 0) * K, c.z * K)), color: colorOf(part.nodeIds[0]), alpha: 1, pick: part.nodeIds[0] }));
     }
-    if (show.rods) for (const s of asm.shafts) out.push({ mesh: `s:${s.id}`, model: modelZ(0, s.x * K, s.y * K, s.zFrom * K), color: metal, alpha: 1 });
+    if (show.rods) for (const s of asm.shafts) out.push({ mesh: `s:${s.id}`, model: multiply(frameMatrix(asm.groups[s.group] ?? WORLD), modelZ(0, s.x * K, s.y * K, s.zFrom * K)), color: metal, alpha: 1 });
     const motorNode = train.nodes.find((n) => n.id === train.motorId);
     if (show.motor && motorNode) {
       const plate = asm.plates[0]?.thickness ?? 0;

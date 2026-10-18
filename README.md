@@ -25,6 +25,9 @@ Onglets, avec la vue animée du train et la liste des vérifications toujours vi
    **Montage 3D** : chaque arbre autre que celui du moteur est une tige (Ø réglable, tiges fixes et roues libres, ou tiges
    tournantes et roues serrées) ; position axiale de chaque roue, flasques percés, vérification des collisions en 3D
    (roues dont les plans se recouvrent, roue qui touche une tige, prise axiale, longueur de l'arbre moteur).
+   **Axes perpendiculaires** : renvoi conique à 90° et vis sans fin (1 à 4 filets, irréversibilité calculée) ;
+   la roue fille tourne sur un nouvel axe, visible en 3D. **Tiges libres** : colonnes qui traversent les flasques
+   sans porter de roue, déplaçables dans la vue 2D.
 3. **Moteur et charge** : préréglages N20 / 130 / 370 / 540 modifiables, paramètres identifiés, courbe
    couple-vitesse avec point de fonctionnement ; charge (couple, visqueux, inertie, poids sur tambour) ; régime permanent.
 4. **Simulation** : échelon, rampe ou PWM, intégration RK4, graphiques vitesse / courant / couples / puissances.
@@ -49,6 +52,9 @@ Les projets se sauvegardent automatiquement dans le navigateur (localStorage) et
 | `materials.ts` | PLA, PETG, ABS, ASA, PA, PA-CF, POM |
 | `export.ts` | STL (avec torsion hélicoïdale / chevron), SVG, DXF |
 | `assembly.ts` | Montage 3D : arbres, tiges, positions axiales, flasques, pièces fusionnées, collisions |
+| `bevel.ts` | Engrenages coniques droits à 90° (Tredgold), contour du talon |
+| `worm.ts` | Vis sans fin : angle du filet, entraxe, rendement et irréversibilité |
+| `gearkinds.ts` | Pièce 3D de chaque type de roue (cône rétréci, vis et roue hélicoïdales) |
 | `contact.ts` | Ligne d'action et points de contact instantanés (affichage) |
 | `report.ts` | Fiche récapitulative HTML |
 | `project.ts` | Modèle de projet (JSON), calcul complet |
@@ -65,6 +71,13 @@ l'éventuel dégagement sont la trace exacte de l'arrondi d'outil.
 **Engrènement** : `inv αw = inv αt + 2·tan αn·(x1 + x2)/(z1 + z2)`, `a = (r1 + r2)·cos αt / cos αw`,
 rapport de conduite `εα = [√(ra1² − rb1²) + √(ra2² − rb2²) − a·sin αw] / pb`, recouvrement
 `εβ = b·sin β / (π·mn)`. Dégagement si `x < 1 − z·sin² αt / (2 cos β)`.
+
+**Coniques** (Σ = 90°) : `tan δ1 = z1/z2`, génératrice `R = r / sin δ`, largeur conseillée `b ≤ R/3`,
+roue virtuelle `zv = z / cos δ` pour le profil, la conduite et Lewis, efforts au rayon moyen `r·(1 − b/2R)`.
+
+**Vis sans fin** (module axial m, q = d1/m) : `tan γ = z1/q`, entraxe `a = (q + z2)·m/2`, rapport `z2/z1`,
+rendement `η = tan γ / tan(γ + φ')` et inverse `η' = tan(γ − φ') / tan γ` avec `tan φ' = μ / cos αn` ;
+irréversible si `η' ≤ 0`.
 
 **Moteur DC** : `R = V/Is`, `Ke = (V − R·I0)/ω0`, `Kt = Ts/(Is − I0)`, `Tf = Kt·I0`.
 
@@ -92,4 +105,5 @@ Tige = hauteur entre flasques + 2 épaisseurs. Alésage sur tige fixe = Ø tige 
   frottement interne sec constant. PWM : bornes en court-circuit à l'état bas.
 - Hélicoïdal : le congé de pied est calculé dans le plan apparent avec le rayon d'outil normal.
 - Montage 3D : collisions testées sur les encombrements (cercles de tête), tiges et flasques rigides,
-  pas de fixation moteur ni d'entretoises entre flasques.
+  pas de fixation moteur ni d'entretoises entre flasques ; entre axes non parallèles, test par sphères englobantes.
+- Coniques : approximation de Tredgold, denture droite rétrécie linéairement. Vis sans fin : roue sans gorge, μ = 0,2.

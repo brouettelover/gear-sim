@@ -2,7 +2,8 @@
  * Onglet 6 : export STL / SVG / DXF de chaque pièce et fiche récapitulative.
  */
 import { assemblyMesh, partMesh } from '../core/assembly';
-import { extrudePrism, extrudeShape, meshToStl, shapeToDxf, shapeToSvg } from '../core/export';
+import { extrudePrism, meshToStl, shapeToDxf, shapeToSvg } from '../core/export';
+import { solidMesh } from '../core/gearkinds';
 import type { Computed, Project } from '../core/project';
 import { buildReport } from '../core/report';
 import type { TrainNode } from '../core/train';
@@ -13,7 +14,7 @@ import { Section } from './fields';
 const slug = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-|-$/g, '').toLowerCase() || 'piece';
 
 function exportStl(n: TrainNode) {
-  const mesh = extrudeShape(n.shape, n.spec, n.geo);
+  const mesh = solidMesh(n.solid);
   download(`${slug(n.spec.name)}.stl`, meshToStl(mesh, n.spec.name), 'model/stl');
 }
 

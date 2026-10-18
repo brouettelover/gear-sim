@@ -61,10 +61,10 @@ export function TrainView({ project, computed, update, selectedId, onSelect }: P
   const [theta, setTheta] = useState(0);
   const thetaRef = useRef(0);
   const [box, setBox] = useState<Box | null>(null);
-  const drag = useRef<{ kind: 'pan'; sx: number; sy: number; box: Box } | { kind: 'gear'; id: string } | null>(null);
+  const drag = useRef<{ kind: 'pan'; sx: number; sy: number; box: Box } | { kind: 'gear'; id: string } | { kind: 'rod'; id: string } | null>(null);
 
   const paths = useMemo(() => new Map(train.nodes.map((n) => [n.id, shapePath(n.shape)])), [train]);
-  const bounds = useMemo(() => sceneBounds(train.nodes, train.mode === 'planetary'), [train]);
+  const bounds = useMemo(() => sceneBounds(train.nodes.filter((n) => n.group === 0), train.mode === 'planetary'), [train]);
   const fit = (): Box => {
     const m = Math.max(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY) * 0.08 + 2;
     // repère SVG : y vers le bas → on inverse y
@@ -90,8 +90,11 @@ export function TrainView({ project, computed, update, selectedId, onSelect }: P
     return () => cancelAnimationFrame(raf);
   }, [playing, omega, slow]);
 
-  const ps = poses(train, theta);
   const nodeById = new Map(train.nodes.map((n) => [n.id, n]));
+  const allPoses = poses(train, theta);
+  // vue 2D : seulement les axes parallèles à l'arbre moteur
+  const ps = allPoses.filter((p) => nodeById.get(p.nodeId)!.group === 0);
+  const hidden = train.nodes.some((n) => n.group !== 0);
   const strength = new Map(computed.strength.map((s) => [s.node.id, s]));
 
   // conversion écran → monde (mm, y vers le haut)
@@ -142,6 +145,15 @@ export function TrainView({ project, computed, update, selectedId, onSelect }: P
       setBox({ ...d.box, x: d.box.x - (e.clientX - d.sx) * s, y: d.box.y - (e.clientY - d.sy) * s });
       return;
     }
+    if (d.kind === 'rod') {
+      const w = toWorld(e);
+      update((dr) => {
+        const r = dr.assembly?.freeRods?.find((x) => x.id === d.id);
+        // pas de 0,5 mm
+        if (r) { r.x = (Math.round(w.x * 2) / 2) / 1000; r.y = (Math.round(w.y * 2) / 2) / 1000; }
+      });
+      return;
+    }
     const tg = project.chain.gears.find((x) => x.gear.id === d.id);
     if (!tg || tg.placement.kind !== 'mesh') return;
     const parent = nodeById.get(tg.placement.parent);
@@ -162,7 +174,7 @@ export function TrainView({ project, computed, update, selectedId, onSelect }: P
   const unit = b.w / 100; // épaisseur de trait de référence (mm)
 
   // superpositions des engrènements
-  const overlays = train.meshes.flatMap((m) => {
+  const overlays = train.meshes.filter((m) => m.type === 'parallel' && nodeById.get(m.a)!.group === 0).flatMap((m) => {
     const A = nodeById.get(m.a)!;
     const B = nodeById.get(m.b)!;
     const pa = ps.filter((p) => p.nodeId === A.id);
@@ -208,7 +220,7 @@ export function TrainView({ project, computed, update, selectedId, onSelect }: P
           <View3D
             train={train}
             asm={computed.assembly}
-            poses={ps}
+            poses={allPoses}
             levels={new Map(computed.strength.map((x) => [x.node.id, x.level]))}
             show={show3d}
             selectedId={selectedId}
@@ -216,7 +228,7 @@ export function TrainView({ project, computed, update, selectedId, onSelect }: P
             fitSignal={fitSignal}
           />
           <p className="hint">
-            Glisser : tourner autour · Maj + glisser ou clic droit : déplacer · molette : zoom · clic : sélectionner. Positions axiales et tiges : onglet Train, section « Montage 3D ».
+            Glisser : tourner autour · Maj + glisser ou clic droit : déplacer · molette : zoom · clic : sélectionner{(project.assembly?.freeRods?.length ?? 0) > 0 ? ' · glisser une tige libre (disque gris) : la déplacer' : ''}. Positions axiales et tiges : onglet Train, section « Montage 3D ».
             {selectedNode && ` Sélection : ${selectedNode.spec.name}, z = ${fmt(toMm(computed.assembly.placed[selectedNode.id]?.z ?? 0), 2)} mm.`}
           </p>
         </>
@@ -282,6 +294,20 @@ export function TrainView({ project, computed, update, selectedId, onSelect }: P
               {opts.contacts && o.points.map((q, i) => <circle key={i} cx={toMm(q.x)} cy={toMm(q.y)} r={unit * 0.6} className="contact" />)}
             </g>
           ))}
+          {(project.assembly?.freeRods ?? []).map((r) => (
+            <circle
+              key={`fr${r.id}`}
+              cx={toMm(r.x)}
+              cy={toMm(r.y)}
+              r={toMm(computed.assembly.shafts.find((s) => s.id === r.id)?.radius ?? 1.5e-3)}
+              className="freerod"
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                (e.target as Element).setPointerCapture?.(e.pointerId);
+                drag.current = { kind: 'rod', id: r.id };
+              }}
+            />
+          ))}
           {opts.bbox && <rect x={bounds.minX} y={bounds.minY} width={bounds.maxX - bounds.minX} height={bounds.maxY - bounds.minY} className="bbox" strokeWidth={unit * 0.15} />}
         </g>
         {/* textes dans le repère SVG (non inversé) */}
@@ -319,7 +345,8 @@ export function TrainView({ project, computed, update, selectedId, onSelect }: P
         })}
       </svg>
       <p className="hint">
-        Molette : zoom · glisser le fond : déplacer · {train.mode === 'chain' ? 'glisser une roue : la faire tourner autour de sa roue menante · ' : ''}clic : sélectionner.
+        {hidden && <b>Les roues d'axes perpendiculaires (renvoi conique, vis sans fin) ne s'affichent qu'en 3D. </b>}
+        Molette : zoom · glisser le fond : déplacer · {train.mode === 'chain' ? 'glisser une roue : la faire tourner autour de sa roue menante · ' : ''}clic : sélectionner{(project.assembly?.freeRods?.length ?? 0) > 0 ? ' · glisser une tige libre (disque gris) : la déplacer' : ''}.
         {selectedNode && ` Sélection : ${selectedNode.spec.name}, ${fmt(Math.abs(toRpm(selectedNode.ratio * omega)), 1)} tr/min.`}
       </p>
       </>

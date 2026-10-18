@@ -20,7 +20,8 @@
  * entre roues d'arbres différents dont les plans se recouvrent, roues qui touchent une tige,
  * longueur utile de l'arbre moteur.
  */
-import { extrudePrism, extrudeShape, mergeMeshes, placeMesh, ringShape, type Mesh3D } from './export';
+import { extrudePrism, mergeMeshes, placeMesh, ringShape, type Mesh3D } from './export';
+import { solidMesh } from './gearkinds';
 import { gearGeometry, meshGeometry } from './involute';
 import type { ChainSpec, TrainAnalysis, TrainNode } from './train';
 import type { GearSpec, Point, PrintSettings, Shape, Warning } from './types';
@@ -47,7 +48,34 @@ export interface AssemblySpec {
   motorShaftLength: number;
   /** diamètre du passage de l'arbre moteur dans le flasque inférieur (m) */
   motorHole: number;
+  /** tiges libres, sans roue (colonnes entre flasques, supports), parallèles à l'arbre moteur */
+  freeRods?: FreeRod[];
 }
+
+export interface FreeRod {
+  id: string;
+  name: string;
+  /** position (m) dans le plan des flasques */
+  x: number;
+  y: number;
+}
+
+export type V3 = [number, number, number];
+
+/** Repère d'un groupe d'axes parallèles : monde = o + x·u + y·v + z·w (m). */
+export interface Frame {
+  o: V3;
+  u: V3;
+  v: V3;
+  w: V3;
+}
+
+export const WORLD: Frame = { o: [0, 0, 0], u: [1, 0, 0], v: [0, 1, 0], w: [0, 0, 1] };
+const add = (a: V3, b: V3): V3 => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+const mul = (a: V3, k: number): V3 => [a[0] * k, a[1] * k, a[2] * k];
+const cross = (a: V3, b: V3): V3 => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+/** Point du repère f de coordonnées (x, y, z). */
+export const toWorld = (f: Frame, x: number, y: number, z: number): V3 => add(add(add(f.o, mul(f.u, x)), mul(f.v, y)), mul(f.w, z));
 
 export const DEFAULT_ASSEMBLY: AssemblySpec = {
   rodDiameter: 3 * MM,
@@ -69,7 +97,11 @@ export interface Shaft {
   x: number;
   y: number;
   gearIds: string[];
-  kind: 'motor' | 'rod';
+  /** rod : tige d'une roue ; free : tige libre sans roue */
+  kind: 'motor' | 'rod' | 'free';
+  /** groupe d'axes (0 : parallèles à l'arbre moteur, traversent les flasques) ; x, y, z dans son repère */
+  group: number;
+  name?: string;
   /** étendue axiale de la tige ou de l'arbre moteur (m) */
   zFrom: number;
   zTo: number;
@@ -79,8 +111,10 @@ export interface Shaft {
 export interface Placed {
   id: string;
   shaftId?: string;
-  /** face inférieure (m) */
+  /** groupe d'axes et face inférieure (m) dans son repère */
+  group: number;
   z: number;
+  /** hauteur axiale de la pièce (m) */
   width: number;
 }
 
@@ -107,6 +141,8 @@ export interface Part {
 
 export interface Assembly {
   placed: Record<string, Placed>;
+  /** repère de chaque groupe d'axes (0 = monde) */
+  groups: Frame[];
   shafts: Shaft[];
   plates: Plate[];
   parts: Part[];
@@ -246,35 +282,81 @@ export function analyzeAssembly(train: TrainAnalysis, chain: ChainSpec | null, a
   const meshOverlap: Record<string, number> = {};
 
   if (!chain || train.mode === 'planetary') {
-    for (const n of train.nodes) placed[n.id] = { id: n.id, z: a.plateGap, width: n.spec.faceWidth };
+    for (const n of train.nodes) placed[n.id] = { id: n.id, group: 0, z: a.plateGap, width: n.height };
     for (const m of train.meshes) meshOverlap[`${m.a}|${m.b}`] = Math.min(nodes.get(m.a)!.spec.faceWidth, nodes.get(m.b)!.spec.faceWidth);
-    const h = Math.max(0, ...train.nodes.map((n) => n.spec.faceWidth)) + 2 * a.plateGap;
+    const h = Math.max(0, ...train.nodes.map((n) => n.height)) + 2 * a.plateGap;
     notes.push('Planétaire : toutes les roues sont dans le même plan ; les axes des satellites (porte-satellites) et les flasques ne sont pas générés.');
-    return { placed, shafts: [], plates: [], parts: train.nodes.map((n) => ({ id: n.id, name: n.spec.name, nodeIds: [n.id], collars: [], z: a.plateGap })), meshOverlap, innerHeight: h, rodGearIds: [], warnings, notes };
+    return { placed, groups: [WORLD], shafts: [], plates: [], parts: train.nodes.map((n) => ({ id: n.id, name: n.spec.name, nodeIds: [n.id], collars: [], z: a.plateGap })), meshOverlap, innerHeight: h, rodGearIds: [], warnings, notes };
   }
 
-  // positions axiales, dans l'ordre de dépendance
+  // positions axiales dans le repère de chaque groupe, et repères des groupes (ordre du parcours du train)
   const byId = new Map(chain.gears.map((g) => [g.gear.id, g]));
   const shafts = shaftOf(chain);
-  const zOf = new Map<string, number>();
-  const resolve = (id: string, depth = 0): number => {
-    if (zOf.has(id)) return zOf.get(id)!;
-    const g = byId.get(id);
-    if (!g || depth > chain.gears.length) return a.plateGap;
-    const off = g.axialOffset ?? 0;
-    let z: number;
-    if (g.placement.kind === 'root') z = a.plateGap + off;
-    else {
-      const pz = resolve(g.placement.parent, depth + 1);
-      const parent = byId.get(g.placement.parent);
-      z = g.placement.kind === 'coaxial' ? pz + (parent?.gear.faceWidth ?? 0) + a.layerGap + off : pz + off;
+  const groups: Frame[] = [WORLD];
+  const coaxTop = new Map<string, number[]>();
+  for (const n of train.nodes) {
+    const g = byId.get(n.id);
+    const off = g?.axialOffset ?? 0;
+    const pl = g?.placement ?? { kind: 'root' as const };
+    let z = a.plateGap + off;
+    if (n.link) {
+      // racine d'un nouveau groupe : repère déduit de la roue parente et du renvoi
+      const P = nodes.get(n.link.parent)!;
+      const pp = placed[P.id];
+      const F = groups[pp.group];
+      const base = toWorld(F, P.x, P.y, pp.z);
+      const dir = add(mul(F.u, Math.cos(n.link.angle)), mul(F.v, Math.sin(n.link.angle)));
+      let frame: Frame;
+      if (n.link.kind === 'bevel') {
+        // sommets des cônes confondus ; l'axe de la fille passe par le sommet, dans la direction φ
+        const apex = add(base, mul(F.w, P.solid.apex ?? 0));
+        const w = mul(dir, -1);
+        const u = F.w;
+        frame = { o: add(apex, mul(dir, n.solid.apex ?? 0)), u, v: cross(w, u), w };
+      } else {
+        // axes croisés : la fille est à l'entraxe a, son axe est perpendiculaire à celui du parent
+        const center = add(add(base, mul(F.w, pp.width / 2)), mul(dir, n.link.centerDistance));
+        const w = cross(F.w, dir);
+        const u = mul(dir, -1);
+        frame = { o: add(center, mul(w, -n.height / 2)), u, v: cross(w, u), w };
+      }
+      frame.o = add(frame.o, mul(frame.w, off));
+      groups[n.group] = frame;
+      z = 0;
+    } else if (pl.kind !== 'root') {
+      const P = nodes.get(pl.parent);
+      const pp = P ? placed[P.id] : undefined;
+      if (P && pp) {
+        if (pl.kind === 'coaxial') {
+          // derrière une roue conique (côté opposé au sommet), au-dessus pour les autres
+          // plusieurs roues coaxiales sur la même roue : on empile au-dessus de la plus haute
+          const above = Math.max(pp.z + pp.width, ...(coaxTop.get(P.id) ?? []));
+          z = P.spec.type === 'bevel' ? pp.z - a.layerGap - n.height + off : above + a.layerGap + off;
+          if (P.spec.type !== 'bevel') coaxTop.set(P.id, [...(coaxTop.get(P.id) ?? []), z + n.height]);
+        } else {
+          z = pp.z + off;
+        }
+      }
     }
-    zOf.set(id, z);
-    return z;
-  };
-  for (const n of train.nodes) placed[n.id] = { id: n.id, shaftId: isRotating(n.spec) ? shafts.get(n.id) : undefined, z: resolve(n.id), width: n.spec.faceWidth };
+    placed[n.id] = { id: n.id, group: n.group, shaftId: isRotating(n.spec) ? shafts.get(n.id) : undefined, z, width: n.height };
+  }
 
-  const top = Math.max(...Object.values(placed).map((p) => p.z + p.width));
+  // encombrement de chaque roue : centre (monde) et rayon de la sphère englobante
+  const sphere = (n: TrainNode) => {
+    const p = placed[n.id];
+    const F = groups[p.group] ?? WORLD;
+    const r = n.geo.kind === 'rack' ? (n.geo.z * n.geo.pt) / 2 : outerRadius(n);
+    return { c: toWorld(F, n.x, n.y, p.z + p.width / 2), r: Math.hypot(r, p.width / 2) };
+  };
+  let top = 0;
+  for (const n of train.nodes) {
+    const p = placed[n.id];
+    if (p.group === 0) top = Math.max(top, p.z + p.width);
+    else {
+      const sp = sphere(n);
+      top = Math.max(top, sp.c[2] + sp.r);
+    }
+  }
   const innerHeight = top + a.plateGap;
   const motorTop = a.motorShaftLength - a.plateThickness;
 
@@ -289,7 +371,7 @@ export function analyzeAssembly(train: TrainAnalysis, chain: ChainSpec | null, a
       const motor = sid === motorShaftId;
       const root = nodes.get(sid) ?? n;
       s = {
-        id: sid, rootGearId: root.id, x: root.x, y: root.y, gearIds: [], kind: motor ? 'motor' : 'rod',
+        id: sid, rootGearId: root.id, x: root.x, y: root.y, gearIds: [], kind: motor ? 'motor' : 'rod', group: placed[root.id]?.group ?? 0,
         zFrom: -a.plateThickness, zTo: motor ? motorTop : innerHeight + a.plateThickness,
         radius: motor ? (nodes.get(train.motorId)!.spec.bore.diameter || 3 * MM) / 2 : a.rodDiameter / 2,
       };
@@ -297,28 +379,50 @@ export function analyzeAssembly(train: TrainAnalysis, chain: ChainSpec | null, a
     }
     s.gearIds.push(n.id);
   }
-  for (const s of shaftList) s.gearIds.sort((i, j) => placed[i].z - placed[j].z);
+  for (const s of shaftList) {
+    s.gearIds.sort((i, j) => placed[i].z - placed[j].z);
+    if (s.group !== 0) {
+      // axe non parallèle aux flasques : tige limitée aux roues, 3 mm de chaque côté (support à prévoir)
+      s.zFrom = Math.min(...s.gearIds.map((id) => placed[id].z)) - 3 * MM;
+      s.zTo = Math.max(...s.gearIds.map((id) => placed[id].z + placed[id].width)) + 3 * MM;
+    }
+  }
+  for (const f of a.freeRods ?? []) {
+    shaftList.push({ id: f.id, rootGearId: '', name: f.name, x: f.x, y: f.y, gearIds: [], kind: 'free', group: 0, zFrom: -a.plateThickness, zTo: innerHeight + a.plateThickness, radius: a.rodDiameter / 2 });
+  }
   const nameOf = (id: string) => nodes.get(id)?.spec.name ?? id;
+  const shaftName = (s: Shaft) => (s.kind === 'motor' ? 'l\'arbre moteur' : s.kind === 'free' ? `la tige libre « ${s.name} »` : `la tige de « ${nameOf(s.rootGearId)} »`);
 
-  // engrènements : prise axiale
+  // engrènements : prise axiale (axes parallèles seulement)
   const meshed = new Set<string>();
   for (const m of train.meshes) {
+    meshed.add([m.a, m.b].sort().join('|'));
     const A = placed[m.a], B = placed[m.b];
+    if (m.type !== 'parallel') {
+      meshOverlap[`${m.a}|${m.b}`] = Math.min(nodes.get(m.a)!.spec.faceWidth, nodes.get(m.b)!.spec.faceWidth);
+      continue;
+    }
     const ov = Math.min(A.z + A.width, B.z + B.width) - Math.max(A.z, B.z);
     const full = Math.min(A.width, B.width);
     meshOverlap[`${m.a}|${m.b}`] = Math.max(0, ov);
-    meshed.add([m.a, m.b].sort().join('|'));
     if (ov <= EPS) warnings.push({ severity: 'error', message: `« ${nameOf(m.a)} » et « ${nameOf(m.b)} » ne sont pas dans le même plan : elles n'engrènent pas. Réglez leur position axiale.` });
     else if (ov < full - EPS) warnings.push({ severity: 'warning', message: `« ${nameOf(m.a)} » / « ${nameOf(m.b)} » : prise axiale partielle (${fmt(toMm(ov), 2)} mm sur ${fmt(toMm(full), 2)} mm), la résistance est calculée sur cette largeur.` });
   }
 
-  // collisions entre roues
+  // collisions entre roues d'un même groupe d'axes
   const list = train.nodes;
+  let crossPairs = 0;
   for (let i = 0; i < list.length; i++) {
     for (let j = i + 1; j < list.length; j++) {
       const A = list[i], B = list[j];
       if (meshed.has([A.id, B.id].sort().join('|'))) continue;
       const pa = placed[A.id], pb = placed[B.id];
+      if (pa.group !== pb.group) {
+        // axes non parallèles : test grossier des sphères englobantes
+        const sa = sphere(A), sb = sphere(B);
+        if (Math.hypot(sa.c[0] - sb.c[0], sa.c[1] - sb.c[1], sa.c[2] - sb.c[2]) < sa.r + sb.r) crossPairs++;
+        continue;
+      }
       const sep = Math.max(pa.z, pb.z) - Math.min(pa.z + pa.width, pb.z + pb.width); // < 0 : plans qui se recouvrent
       const sameShaft = pa.shaftId && pa.shaftId === pb.shaftId;
       if (sameShaft) {
@@ -346,18 +450,16 @@ export function analyzeAssembly(train: TrainAnalysis, chain: ChainSpec | null, a
       }
     }
   }
+  if (crossPairs) warnings.push({ severity: 'info', message: `${crossPairs} paire(s) de roues d'axes non parallèles sont proches l'une de l'autre : vérifiez l'absence de contact dans la vue 3D (test simplifié).` });
 
-  // roues qui touchent une tige ou l'arbre moteur d'un autre arbre
+  // roues qui touchent une tige ou l'arbre moteur d'un autre arbre (même groupe d'axes)
   for (const n of list) {
     const pn = placed[n.id];
     for (const s of shaftList) {
-      if (pn.shaftId === s.id) continue;
+      if (pn.shaftId === s.id || s.group !== pn.group) continue;
       if (Math.min(pn.z + pn.width, s.zTo) - Math.max(pn.z, s.zFrom) <= EPS) continue;
       if (clearanceToCircle(n, { x: s.x, y: s.y }, s.radius + ROD_CLEARANCE) < 0) {
-        warnings.push({
-          severity: 'error',
-          message: `« ${n.spec.name} » touche ${s.kind === 'motor' ? 'l\'arbre moteur' : `la tige de « ${nameOf(s.rootGearId)} »`}. Éloignez les arbres ou passez par un autre placement.`,
-        });
+        warnings.push({ severity: 'error', message: `« ${n.spec.name} » touche ${shaftName(s)}. Éloignez les arbres ou passez par un autre placement.` });
       }
     }
   }
@@ -367,30 +469,40 @@ export function analyzeAssembly(train: TrainAnalysis, chain: ChainSpec | null, a
   if (motorShaft) {
     for (const id of motorShaft.gearIds) {
       const p = placed[id];
-      if (p.z + p.width > motorTop + EPS) {
+      if (p.z >= motorTop - EPS) {
+        warnings.push({ severity: 'error', message: `« ${nameOf(id)} » est entièrement au-dessus du bout de l'arbre moteur (${fmt(toMm(motorTop), 1)} mm utiles au-dessus du flasque) : placez-la sur l'arbre d'une autre roue, ou allongez l'arbre moteur.` });
+      } else if (p.z + p.width > motorTop + EPS) {
         warnings.push({ severity: 'warning', message: `« ${nameOf(id)} » dépasse le bout de l'arbre moteur (${fmt(toMm(motorTop), 1)} mm utiles au-dessus du flasque) : prise partielle sur l'arbre.` });
       }
     }
   }
   for (const n of list) {
-    if (placed[n.id].z < -EPS) warnings.push({ severity: 'error', message: `« ${n.spec.name} » traverse le flasque inférieur (z = ${fmt(toMm(placed[n.id].z), 2)} mm).` });
+    const p = placed[n.id];
+    const low = p.group === 0 ? p.z : sphere(n).c[2] - sphere(n).r;
+    if (low < -EPS) warnings.push({ severity: 'error', message: `« ${n.spec.name} » traverse le flasque inférieur (z = ${fmt(toMm(low), 2)} mm)${p.group === 0 ? '' : ' : augmentez le décalage axial de la roue qui porte le renvoi'}.` });
   }
 
-  // flasques : rectangle arrondi englobant roues et tiges
+  // flasques : rectangle arrondi englobant roues et tiges (projetées sur le plan des flasques)
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
   const grow = (x: number, y: number, r = 0) => {
     x0 = Math.min(x0, x - r); x1 = Math.max(x1, x + r);
     y0 = Math.min(y0, y - r); y1 = Math.max(y1, y + r);
   };
   for (const n of list) {
-    if (n.geo.kind === 'rack') for (const c of rackCorners(n)) grow(c.x, c.y);
+    if (placed[n.id].group !== 0) {
+      const sp = sphere(n);
+      grow(sp.c[0], sp.c[1], sp.r);
+    } else if (n.geo.kind === 'rack') for (const c of rackCorners(n)) grow(c.x, c.y);
     else grow(n.x, n.y, outerRadius(n));
   }
+  for (const f of a.freeRods ?? []) grow(f.x, f.y, a.rodDiameter / 2 + 1 * MM);
   x0 -= a.plateMargin; y0 -= a.plateMargin; x1 += a.plateMargin; y1 += a.plateMargin;
   const outer = roundedRect(x0, y0, x1, y1, Math.max(a.plateMargin, 2 * MM));
-  // tiges fixes : serrées dans les flasques ; tiges tournantes : libres dans les flasques
-  const rodHoleD = a.rodDiameter + print.boreTolerance + (a.rodMode === 'rotating' ? a.runningClearance : 0);
-  const rodHoles = shaftList.filter((s) => s.kind === 'rod').map((s) => circle(s.x, s.y, rodHoleD / 2, 48, true));
+  // tiges fixes : serrées dans les flasques ; tiges tournantes : libres dans les flasques ; tiges libres : serrées
+  const pressD = a.rodDiameter + print.boreTolerance;
+  const rodHoles = shaftList
+    .filter((s) => s.group === 0 && s.kind !== 'motor')
+    .map((s) => circle(s.x, s.y, (pressD + (s.kind === 'rod' && a.rodMode === 'rotating' ? a.runningClearance : 0)) / 2, 48, true));
   const bottomHoles = [...rodHoles];
   if (motorShaft) bottomHoles.push(circle(motorShaft.x, motorShaft.y, a.motorHole / 2, 48, true));
   const plates: Plate[] = [
@@ -426,10 +538,11 @@ export function analyzeAssembly(train: TrainAnalysis, chain: ChainSpec | null, a
 
   if (a.rodMode === 'fixed') notes.push('Tiges fixes : serrées (ou collées) dans les flasques ; les roues tournent librement dessus. Les roues d\'une même tige sont imprimées d\'un seul tenant.');
   else notes.push('Tiges tournantes : libres dans les flasques, roues serrées sur la tige ; prévoir des bagues d\'arrêt ou des entretoises pour tenir les roues en place.');
+  if (groups.length > 1) notes.push('Axes perpendiculaires (renvoi conique, vis sans fin) : leurs tiges ne traversent pas les flasques ; prévoir un palier ou une équerre. Elles sont coupées à 3 mm de part et d\'autre des roues.');
   if (list.some((n) => n.geo.kind === 'rack')) notes.push('Le guidage de la crémaillère n\'est pas généré.');
   if (list.some((n) => n.geo.kind === 'internal')) notes.push('La couronne n\'a pas de moyeu : prévoir sa fixation sur son arbre.');
 
-  return { placed, shafts: shaftList, plates, parts, meshOverlap, innerHeight, rodGearIds, warnings, notes };
+  return { placed, groups, shafts: shaftList, plates, parts, meshOverlap, innerHeight, rodGearIds, warnings, notes };
 }
 
 const MM_PER_M = 1000;
@@ -439,10 +552,21 @@ export function partMesh(part: Part, train: TrainAnalysis, asm: Assembly): Mesh3
   const meshes: Mesh3D[] = [];
   for (const id of part.nodeIds) {
     const n = train.nodes.find((x) => x.id === id)!;
-    meshes.push(placeMesh(extrudeShape(n.shape, n.spec, n.geo), 0, 0, 0, (asm.placed[id].z - part.z) * MM_PER_M));
+    meshes.push(placeMesh(solidMesh(n.solid), 0, 0, 0, (asm.placed[id].z - part.z) * MM_PER_M));
   }
   for (const c of part.collars) meshes.push(placeMesh(extrudePrism(ringShape(c.r, c.bore), c.h), 0, 0, 0, (c.z - part.z) * MM_PER_M));
   return mergeMeshes(meshes);
+}
+
+/** Maillage (mm) exprimé dans le repère f, ramené au repère monde. */
+export function frameMesh(m: Mesh3D, f: Frame): Mesh3D {
+  if (f === WORLD) return m;
+  const P = new Float32Array(m.positions.length);
+  for (let i = 0; i < P.length; i += 3) {
+    const x = m.positions[i], y = m.positions[i + 1], z = m.positions[i + 2];
+    for (let k = 0; k < 3; k++) P[i + k] = f.o[k] * MM_PER_M + x * f.u[k] + y * f.v[k] + z * f.w[k];
+  }
+  return { positions: P, indices: m.indices };
 }
 
 /** Ensemble monté au repos (mm), pour contrôle dans un logiciel de CAO ou un trancheur. */
@@ -456,10 +580,12 @@ export function assemblyMesh(train: TrainAnalysis, asm: Assembly, withPlates = t
       y += n.rackShift! * Math.sin(n.rackAngle!);
       angle = n.rackAngle!;
     }
-    meshes.push(placeMesh(partMesh(part, train, asm), angle, x * MM_PER_M, y * MM_PER_M, part.z * MM_PER_M));
+    const F = asm.groups[asm.placed[n.id].group] ?? WORLD;
+    meshes.push(frameMesh(placeMesh(partMesh(part, train, asm), angle, x * MM_PER_M, y * MM_PER_M, part.z * MM_PER_M), F));
   }
   for (const s of asm.shafts) {
-    meshes.push(placeMesh(extrudePrism(ringShape(s.radius), s.zTo - s.zFrom), 0, s.x * MM_PER_M, s.y * MM_PER_M, s.zFrom * MM_PER_M));
+    const F = asm.groups[s.group] ?? WORLD;
+    meshes.push(frameMesh(placeMesh(extrudePrism(ringShape(s.radius), s.zTo - s.zFrom), 0, s.x * MM_PER_M, s.y * MM_PER_M, s.zFrom * MM_PER_M), F));
   }
   if (withPlates) for (const p of asm.plates) meshes.push(placeMesh(extrudePrism(p.shape, p.thickness), 0, 0, 0, p.z * MM_PER_M));
   return mergeMeshes(meshes);
@@ -482,18 +608,19 @@ export function suggestMeshGear(train: TrainAnalysis, asm: Assembly, parentId: s
 /** Meilleur angle pour une roue donnée ; `free` : au moins 1 mm de jeu partout. */
 export function freeMeshAngle(train: TrainAnalysis, asm: Assembly, parentId: string, child: GearSpec, print: PrintSettings, rodRadius: number, preferred: number): { angle: number; free: boolean } {
   const parent = train.nodes.find((n) => n.id === parentId);
-  if (!parent || parent.geo.kind !== 'external' || child.type === 'rack' || child.type === 'internal') return { angle: preferred, free: true };
+  if (!parent || parent.geo.kind !== 'external' || !['spur', 'helical', 'herringbone'].includes(child.type) || ['bevel', 'worm', 'wormwheel'].includes(parent.spec.type)) return { angle: preferred, free: true };
   const geo = gearGeometry(child, print);
   const a = meshGeometry(parent.geo, geo).centerDistance;
   const z0 = asm.placed[parentId]?.z ?? 0;
   const z1 = z0 + child.faceWidth;
   const overlaps = (lo: number, hi: number) => Math.min(hi, z1) - Math.max(lo, z0) > EPS;
   const parentShaft = asm.placed[parentId]?.shaftId;
+  const n0group = asm.placed[parentId]?.group ?? 0;
   const score = (ang: number) => {
     const c = { x: parent.x + a * Math.cos(ang), y: parent.y + a * Math.sin(ang) };
     let best = Infinity;
     for (const n of train.nodes) {
-      if (n.id === parentId) continue;
+      if (n.id === parentId || asm.placed[n.id]?.group !== n0group) continue;
       const p = asm.placed[n.id];
       // la nouvelle roue contre les autres roues de son plan
       if (overlaps(p.z, p.z + p.width)) best = Math.min(best, clearanceToCircle(n, c, geo.ra));
@@ -501,7 +628,7 @@ export function freeMeshAngle(train: TrainAnalysis, asm: Assembly, parentId: str
       if (n.geo.kind !== 'internal') best = Math.min(best, clearanceToCircle(n, c, rodRadius + ROD_CLEARANCE));
     }
     for (const s of asm.shafts) {
-      if (s.id === parentShaft || !overlaps(s.zFrom, s.zTo)) continue;
+      if (s.id === parentShaft || s.group !== n0group || !overlaps(s.zFrom, s.zTo)) continue;
       best = Math.min(best, Math.hypot(c.x - s.x, c.y - s.y) - geo.ra - s.radius - ROD_CLEARANCE);
     }
     return best;

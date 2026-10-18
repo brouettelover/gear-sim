@@ -7,7 +7,7 @@ import { describeRatio, directionLabel, type Placement, type PlanetaryMember } f
 import { suggestMeshGear, type AssemblySpec } from '../core/assembly';
 import { DEG, MM, fmt, toMm, toRpm } from '../core/units';
 import type { Updater } from './App';
-import { CheckField, NumField, Section, SelectField, Stat } from './fields';
+import { CheckField, NumField, Section, SelectField, Stat, TextField } from './fields';
 
 interface Props {
   project: Project;
@@ -126,6 +126,10 @@ function ChainEditor({ project, computed, update, selectedId, onSelect }: { proj
         helixAngle: kind === 'mesh' && helix ? -parent.helixAngle : 0,
         bore: kind === 'coaxial' ? { ...parent.bore } : { type: 'round', diameter: parent.bore.diameter, flat: 0 },
       });
+      // roue conjuguée d'une roue conique ou d'une vis : même famille
+      if (kind === 'mesh' && parent.type === 'bevel') Object.assign(g, { type: 'bevel', teeth: parent.teeth, faceWidth: parent.faceWidth, rimWidth: parent.rimWidth, profileShift: 0 });
+      if (kind === 'mesh' && parent.type === 'worm') Object.assign(g, { type: 'wormwheel', teeth: 30, profileShift: 0 });
+      if (kind === 'mesh' && parent.type === 'wormwheel') Object.assign(g, { type: 'worm', teeth: 1, diameterFactor: 10, helixAngle: 1, profileShift: 0, faceWidth: Math.ceil((4 * Math.PI * parent.module) / MM) * MM });
       // nouvelle roue : on l'écarte des roues déjà placées autour de la roue menante
       const used = d.chain.gears.filter((x) => x.placement.kind === 'mesh' && x.placement.parent === parent.id).length;
       // direction préférée : dans le prolongement de l'arbre moteur vers la roue menante, puis une place libre
@@ -141,6 +145,47 @@ function ChainEditor({ project, computed, update, selectedId, onSelect }: { proj
       d.chain.gears.push({ gear: g, placement });
       d.chain.outputId = g.id;
       setTimeout(() => onSelect(g.id));
+    });
+
+  /** renvoi d'angle : conique ou vis sans fin, accroché à la roue sélectionnée (ou ajouté sur son arbre) */
+  const addAngle = (kind: 'bevel' | 'worm') =>
+    update((d) => {
+      const sg = d.chain.gears.find((g) => g.gear.id === sel.gear.id)!.gear;
+      const base = { module: sg.module, pressureAngle: sg.pressureAngle, materialId: sg.materialId, profileShift: 0, helixAngle: 0 };
+      const n = d.chain.gears.length;
+      let parent = sg;
+      const push = (gear: ReturnType<typeof defaultGear>, placement: Placement) => {
+        d.chain.gears.push({ gear, placement });
+        return gear;
+      };
+      if (kind === 'bevel') {
+        if (sg.type !== 'bevel') {
+          parent = push(defaultGear({ ...base, id: newId(), name: `Conique ${n + 1}`, type: 'bevel', teeth: 20, faceWidth: 4.5 * MM, rimWidth: 2 * MM, bore: { ...sg.bore } }), { kind: 'coaxial', parent: sg.id });
+        }
+        const child = push(defaultGear({ ...base, id: newId(), name: `Conique ${d.chain.gears.length + 1}`, type: 'bevel', teeth: parent.teeth, faceWidth: parent.faceWidth, rimWidth: 2 * MM, bore: { type: 'round', diameter: 3 * MM, flat: 0 } }), { kind: 'mesh', parent: parent.id, angle: 0 });
+        d.chain.outputId = child.id;
+        setTimeout(() => onSelect(child.id));
+      } else {
+        const wormSpec = (bore: typeof sg.bore) => defaultGear({ ...base, id: newId(), name: 'Vis sans fin', type: 'worm', teeth: 1, faceWidth: Math.ceil(4 * Math.PI * sg.module / MM) * MM, diameterFactor: 10, helixAngle: 1, bore: { ...bore } });
+        const wheelSpec = () => defaultGear({ ...base, id: newId(), name: 'Roue de vis', type: 'wormwheel', teeth: 30, faceWidth: 6 * MM, bore: { type: 'round', diameter: 3 * MM, flat: 0 } });
+        let child;
+        if (sg.type === 'worm') child = push(wheelSpec(), { kind: 'mesh', parent: sg.id, angle: 0 });
+        else if (sg.type === 'wormwheel') child = push(wormSpec({ type: 'round', diameter: 3 * MM, flat: 0 }), { kind: 'mesh', parent: sg.id, angle: 0 });
+        else {
+          parent = push(wormSpec(sg.bore), { kind: 'coaxial', parent: sg.id });
+          child = push(wheelSpec(), { kind: 'mesh', parent: parent.id, angle: 0 });
+          // la roue est dans un plan vertical : on monte la vis pour que la roue passe au-dessus du flasque
+          const pp = computed.assembly.placed[sg.id];
+          if (pp && pp.group === 0) {
+            const wormMid = pp.z + pp.width + d.assembly.layerGap + parent.faceWidth / 2;
+            const need = ((child.teeth + 2.5) * child.module) / 2 + d.assembly.plateGap + 0.5 * MM;
+            const g = d.chain.gears.find((x) => x.gear.id === parent.id)!;
+            if (need > wormMid) g.axialOffset = Math.ceil((need - wormMid) / MM * 2) / 2 * MM;
+          }
+        }
+        d.chain.outputId = child.id;
+        setTimeout(() => onSelect(child.id));
+      }
     });
 
   const remove = () =>
@@ -187,6 +232,8 @@ function ChainEditor({ project, computed, update, selectedId, onSelect }: { proj
       <div className="row">
         <button onClick={() => add('mesh')}>+ Roue qui engrène avec « {sel.gear.name} »</button>
         <button onClick={() => add('coaxial')}>+ Roue sur le même arbre</button>
+        <button onClick={() => addAngle('bevel')}>+ Renvoi conique à 90°</button>
+        <button onClick={() => addAngle('worm')}>+ Vis sans fin</button>
         {sel.placement.kind !== 'root' && (
           <button className="danger" onClick={remove}>
             Supprimer
@@ -211,7 +258,7 @@ function ChainEditor({ project, computed, update, selectedId, onSelect }: { proj
             onChange={(v) => setPlacement((p) => ({ ...(p as { kind: 'mesh'; angle: number }), parent: v }) as Placement)}
           />
           {sel.placement.kind === 'mesh' && (
-            <NumField label="Angle de placement" value={sel.placement.angle} factor={DEG} unit="°" step={5} digits={1} onChange={(v) => setPlacement((p) => ({ ...(p as { kind: 'mesh'; parent: string; angle: number }), angle: v }))} hint="Direction de la roue menante vers le point primitif ; vous pouvez aussi glisser la roue dans la vue" />
+            <NumField label={['bevel', 'worm', 'wormwheel'].includes(sel.gear.type) ? 'Direction du renvoi' : 'Angle de placement'} value={sel.placement.angle} factor={DEG} unit="°" step={5} digits={1} onChange={(v) => setPlacement((p) => ({ ...(p as { kind: 'mesh'; parent: string; angle: number }), angle: v }))} hint="Direction de la roue menante vers le point primitif ; vous pouvez aussi glisser la roue dans la vue" />
           )}
         </div>
       )}
@@ -299,6 +346,33 @@ function AssemblyEditor({ project, computed, update, selectedId }: { project: Pr
         <NumField label="Passage de l'arbre moteur" value={a.motorHole} factor={MM} unit="mm" step={0.5} digits={2} min={1} onChange={(v) => set((s) => void (s.motorHole = v))} hint="Trou du flasque inférieur : à mesurer sur votre moteur (bossage du palier)" />
       </div>
       <CheckField label="Alésage des roues imposé par la tige" checked={a.autoBores} onChange={(v) => set((s) => void (s.autoBores = v))} />
+      <h3 className="subhead">Tiges libres (colonnes, supports)</h3>
+      {(a.freeRods ?? []).map((r, i) => (
+        <div key={r.id} className="grid3">
+          <TextField label="Nom" value={r.name} onChange={(v) => set((s) => void (s.freeRods![i].name = v))} />
+          <NumField label="x" value={r.x} factor={MM} unit="mm" step={0.5} digits={2} onChange={(v) => set((s) => void (s.freeRods![i].x = v))} />
+          <NumField label="y" value={r.y} factor={MM} unit="mm" step={0.5} digits={2} onChange={(v) => set((s) => void (s.freeRods![i].y = v))} />
+          <button className="small danger" onClick={() => set((s) => void s.freeRods!.splice(i, 1))}>Supprimer</button>
+        </div>
+      ))}
+      <button
+        className="small"
+        onClick={() =>
+          set((s) => {
+            // coin du flasque, à l'intérieur de la marge
+            const pts = asm.plates[0]?.shape.outer ?? [{ x: 0, y: 0 }];
+            const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
+            const k = (s.freeRods ?? []).length;
+            const inset = s.plateMargin / 2 + s.rodDiameter / 2 + 0.5 * MM;
+            const x = k % 2 ? Math.min(...xs) + inset : Math.max(...xs) - inset;
+            const y = k % 4 >= 2 ? Math.max(...ys) - inset : Math.min(...ys) + inset;
+            s.freeRods = [...(s.freeRods ?? []), { id: newId(), name: `Colonne ${k + 1}`, x: Math.round(x / MM * 2) / 2 * MM, y: Math.round(y / MM * 2) / 2 * MM }];
+          })
+        }
+      >
+        + Tige libre
+      </button>
+      <p className="muted small">Une tige libre traverse les deux flasques sans porter de roue : colonne d'entretoisement ou support. Elle se déplace aussi en la glissant dans la vue 2D. Les flasques s'agrandissent pour l'englober.</p>
       <table className="table">
         <thead>
           <tr>
@@ -310,8 +384,8 @@ function AssemblyEditor({ project, computed, update, selectedId }: { project: Pr
         <tbody>
           {asm.shafts.map((s) => (
             <tr key={s.id}>
-              <td>{s.kind === 'motor' ? 'Moteur' : `Tige de « ${nodeName(s.rootGearId)} »`}</td>
-              <td>{s.gearIds.map(nodeName).join(', ')}</td>
+              <td>{s.kind === 'motor' ? 'Moteur' : s.kind === 'free' ? `Tige libre « ${s.name} »` : `Tige de « ${nodeName(s.rootGearId)} »`}{s.group !== 0 ? ' (axe perpendiculaire)' : ''}</td>
+              <td>{s.gearIds.map(nodeName).join(', ') || '—'}</td>
               <td>{s.kind === 'motor' ? `arbre Ø ${fmt(toMm(2 * s.radius), 1)} mm` : `Ø ${fmt(toMm(2 * s.radius), 1)} × ${fmt(toMm(s.zTo - s.zFrom), 1)} mm`}</td>
             </tr>
           ))}

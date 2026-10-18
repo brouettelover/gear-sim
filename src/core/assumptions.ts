@@ -16,6 +16,7 @@ export const SIMPLIFICATIONS: { title: string; items: string[] }[] = [
       'Rendement par engrènement constant, indépendant de la charge, de la vitesse et de la lubrification.',
       'Planétaire : rendement η² quel que soit le montage, satellites équirépartis, partage de charge parfait, porte-satellites sans inertie.',
       'Paliers et arbres sans frottement ni flexion ; pas de jeu de fonctionnement dans la cinématique.',
+      'Vis sans fin : frottement acier/plastique μ = 0,2 constant ; rendement tan γ / tan(γ + φ\') ; irréversible si γ ≤ φ\'.',
     ],
   },
   {
@@ -25,6 +26,9 @@ export const SIMPLIFICATIONS: { title: string; items: string[] }[] = [
       'Tiges, flasques et arbre moteur rigides ; aucun jeu axial ni radial pris en compte dans l\'engrènement.',
       'Hélicoïdal : la phase des dents n\'est cohérente qu\'entre roues dont les faces inférieures sont au même niveau.',
       'Pièces fusionnées : roues et entretoise juxtaposées dans un même fichier (coques qui se touchent, sans union booléenne) ; les trancheurs les réunissent.',
+      'Coniques droits à 90° : profil au talon par l\'approximation de Tredgold (roue droite virtuelle zv = z / cos δ), denture rétrécie linéairement vers le sommet ; Lewis au rayon moyen.',
+      'Roue de vis : roue hélicoïdale sans gorge (contact quasi ponctuel avec la vis, usure plus rapide qu\'une roue globique).',
+      'Collisions entre roues d\'axes non parallèles : test grossier par sphères englobantes, à vérifier dans la vue 3D.',
       'Flasques rectangulaires sans fixation du moteur (vis) ni entretoises entre flasques : à ajouter selon votre moteur et votre châssis.',
     ],
   },
