@@ -48,6 +48,8 @@ export type Updater = (fn: (draft: Project) => void) => void;
 export function App() {
   const [project, setProject] = useState<Project>(loadInitial);
   const [tab, setTab] = useState<Tab>('gear');
+  const [confirmReset, setConfirmReset] = useState(false);
+  const [importError, setImportError] = useState('');
   const [selected, setSelected] = useState<string>(() => projectGears(project)[0]?.id ?? '');
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -79,8 +81,9 @@ export function App() {
       const p = parseProject(await f.text());
       setProject(p);
       setSelected(projectGears(p)[0]?.id ?? '');
+      setImportError('');
     } catch (e) {
-      alert(`Import impossible : ${(e as Error).message}`);
+      setImportError(`Import impossible : ${(e as Error).message}`);
     }
   };
 
@@ -95,20 +98,23 @@ export function App() {
           <button onClick={() => download(`${project.name || 'projet'}.json`, serializeProject(project), 'application/json')}>Exporter le projet (JSON)</button>
           <button onClick={() => fileRef.current?.click()}>Importer…</button>
           <input ref={fileRef} type="file" accept=".json,application/json" hidden onChange={(e) => e.target.files?.[0] && importFile(e.target.files[0])} />
+          {/* confirmation en deux clics (les boîtes de dialogue natives ne sont pas toujours disponibles) */}
           <button
-            className="ghost"
+            className={confirmReset ? 'danger' : 'ghost'}
+            onBlur={() => setConfirmReset(false)}
             onClick={() => {
-              if (confirm('Repartir du projet par défaut ? Le projet actuel sera perdu s\'il n\'a pas été exporté.')) {
-                const p = defaultProject();
-                setProject(p);
-                setSelected(projectGears(p)[0].id);
-              }
+              if (!confirmReset) return setConfirmReset(true);
+              const p = defaultProject();
+              setProject(p);
+              setSelected(projectGears(p)[0].id);
+              setConfirmReset(false);
             }}
           >
-            Nouveau
+            {confirmReset ? 'Confirmer : effacer le projet actuel' : 'Nouveau'}
           </button>
         </div>
       </header>
+      {importError && <div className="banner error-text">{importError}</div>}
       <div className="banner">
         Modèle simplifié : rendement constant, dents indéformables, contrainte de Lewis sans usure ni fatigue détaillée, moteur à paramètres constants.
         Les résultats sont des ordres de grandeur. <button className="link" onClick={() => setTab('assumptions')}>Voir toutes les hypothèses</button>
