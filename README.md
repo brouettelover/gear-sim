@@ -1,3 +1,112 @@
 # gear-sim
 
-Simulation d'engrenages imprimés en 3D (FDM) entraînés par de petits moteurs DC.
+Simulation d'engrenages imprimés en 3D (FDM) entraînés par de petits moteurs DC (N20, 130, 370, 540).
+Application web monopage (TypeScript + React + Vite), sans backend. Toute la logique de calcul
+vit dans `src/core/`, en modules purs testés avec Vitest ; l'interface est dans `src/ui/`.
+
+```bash
+npm install
+npm run dev     # application
+npm test        # tests des modules de calcul
+npm run build   # version statique dans dist/
+```
+
+Unités : SI en interne (m, rad, N·m, rad/s, kg, Pa) ; affichage en mm, N·mm et tr/min.
+
+## Interface
+
+Onglets, avec la vue animée du train et la liste des vérifications toujours visibles à droite :
+
+1. **Engrenage** : type (droit, hélicoïdal, chevron, crémaillère, couronne), module, dents, angle de pression,
+   largeur, déport, angle d'hélice, alésage (rond, en D pour l'arbre N20, hexagonal), matériau ; réglages
+   d'impression (jeu au flanc, jeu radial, compensation des alésages, buse) ; géométrie calculée et profil.
+2. **Train** : simple, composé (roues sur un même arbre, dans des plans différents) ou planétaire ;
+   entraxes automatiques, placement en glissant les roues dans la vue ; rapport, sens et vitesse de chaque arbre, rendement.
+   **Montage 3D** : chaque arbre autre que celui du moteur est une tige (Ø réglable, tiges fixes et roues libres, ou tiges
+   tournantes et roues serrées) ; position axiale de chaque roue, flasques percés, vérification des collisions en 3D
+   (roues dont les plans se recouvrent, roue qui touche une tige, prise axiale, longueur de l'arbre moteur).
+   **Axes perpendiculaires** : renvoi conique à 90° et vis sans fin (1 à 4 filets, irréversibilité calculée) ;
+   la roue fille tourne sur un nouvel axe, visible en 3D. **Tige de transmission** : une roue à chaque bout d'une tige.
+   **Glisser-déposer** : une roue (ou une pièce de la palette) se pose n'importe où dans la vue 2D et s'accroche
+   à une roue voisine quand son centre arrive à l'entraxe ; posée à l'écart, ou hors du plan de sa menante, elle ne tourne pas ;
+   en 3D, glisser la roue sélectionnée le long de sa tige change sa position axiale. **Tiges libres** : colonnes qui traversent les flasques
+   sans porter de roue, déplaçables dans la vue 2D.
+3. **Moteur et charge** : préréglages N20 / 130 / 370 / 540 modifiables, paramètres identifiés, courbe
+   couple-vitesse avec point de fonctionnement ; charge (couple, visqueux, inertie, poids sur tambour) ; régime permanent.
+4. **Simulation** : échelon, rampe ou PWM, intégration RK4, graphiques vitesse / courant / couples / puissances.
+5. **Résistance** : Lewis par roue en service et moteur bloqué, code couleur, matériaux modifiables, réglages d'impression conseillés.
+6. **Export** : STL, SVG et DXF de chaque pièce, roues d'une même tige fusionnées avec leur entretoise,
+   flasques (STL, SVG, DXF), longueurs de tiges à couper, STL de l'ensemble monté, fiche récapitulative imprimable.
+
+La vue de droite passe de 2D à 3D (WebGL 2, sans bibliothèque) : orbite, zoom, sélection d'une roue au clic.
+
+Les projets se sauvegardent automatiquement dans le navigateur (localStorage) et s'exportent / s'importent en JSON.
+
+## Modules de calcul (`src/core`)
+
+| Module | Rôle |
+| --- | --- |
+| `involute.ts` | Géométrie de la développante, entraxe de fonctionnement, rapport de conduite, avertissements |
+| `profile.ts` | Contour 2D exact (développante + congé de pied trochoïdal), couronne, crémaillère, alésages |
+| `motor.ts` | Identification du moteur DC depuis la fiche technique, préréglages |
+| `simulation.ts` | Régime permanent et transitoire (RK4), profils de tension |
+| `train.ts` | Trains simples, composés, planétaires : cinématique, phasage, rendement, inertie, efforts |
+| `strength.ts` | Contrainte de Lewis et coefficient de sécurité |
+| `materials.ts` | PLA, PETG, ABS, ASA, PA, PA-CF, POM |
+| `export.ts` | STL (avec torsion hélicoïdale / chevron), SVG, DXF |
+| `assembly.ts` | Montage 3D : arbres, tiges, positions axiales, flasques, pièces fusionnées, collisions |
+| `bevel.ts` | Engrenages coniques droits à 90° (Tredgold), contour du talon |
+| `worm.ts` | Vis sans fin : angle du filet, entraxe, rendement et irréversibilité |
+| `gearkinds.ts` | Pièce 3D de chaque type de roue (cône rétréci, vis et roue hélicoïdales) |
+| `contact.ts` | Ligne d'action et points de contact instantanés (affichage) |
+| `report.ts` | Fiche récapitulative HTML |
+| `project.ts` | Modèle de projet (JSON), calcul complet |
+
+## Formules utilisées
+
+**Développante** (plan apparent, β angle d'hélice) : `mt = mn / cos β`, `tan αt = tan αn / cos β`,
+`r = z·mt/2`, `rb = r·cos αt`, `ra = r + (1 + x)·mn`, `rf = r − (1 + c* − x)·mn`,
+`inv α = tan α − α`, épaisseur au rayon R : `s_R = 2R·(s/2r + inv αt − inv αR)` avec `cos αR = rb/R`.
+Le profil est obtenu en simulant le taillage par une crémaillère ISO 53 (arrondi de tête
+`ρ = c*·m / (1 − sin α)`, soit 0,38·m) : la développante est analytique, le congé de pied et
+l'éventuel dégagement sont la trace exacte de l'arrondi d'outil.
+
+**Engrènement** : `inv αw = inv αt + 2·tan αn·(x1 + x2)/(z1 + z2)`, `a = (r1 + r2)·cos αt / cos αw`,
+rapport de conduite `εα = [√(ra1² − rb1²) + √(ra2² − rb2²) − a·sin αw] / pb`, recouvrement
+`εβ = b·sin β / (π·mn)`. Dégagement si `x < 1 − z·sin² αt / (2 cos β)`.
+
+**Coniques** (Σ = 90°) : `tan δ1 = z1/z2`, génératrice `R = r / sin δ`, largeur conseillée `b ≤ R/3`,
+roue virtuelle `zv = z / cos δ` pour le profil, la conduite et Lewis, efforts au rayon moyen `r·(1 − b/2R)`.
+
+**Vis sans fin** (module axial m, q = d1/m) : `tan γ = z1/q`, entraxe `a = (q + z2)·m/2`, rapport `z2/z1`,
+rendement `η = tan γ / tan(γ + φ')` et inverse `η' = tan(γ − φ') / tan γ` avec `tan φ' = μ / cos αn` ;
+irréversible si `η' ≤ 0`.
+
+**Moteur DC** : `R = V/Is`, `Ke = (V − R·I0)/ω0`, `Kt = Ts/(Is − I0)`, `Tf = Kt·I0`.
+
+**Simulation** : `L·di/dt = V − R·i − Ke·ω` et `J_eq·dω/dt = Kt·i − Tf − T_charge/(N·η)`,
+avec `J_eq = J_rotor + Σ J_roue·(ωᵢ/ω)² + J_charge/N²`, intégrées par Runge-Kutta 4 à pas fixe.
+
+**Lewis** : `σ = Kv·Ft / (b·m·Y)`, `Kv = (3,05 + V)/3,05`, Y tabulé (Shigley) au nombre de dents
+virtuel `zv = z / cos³ β`. Coefficient de sécurité `n = σ_adm / σ` : vert ≥ 2, orange ≥ 1,25, rouge.
+
+**Montage** (z = 0 sur la face intérieure du flasque inférieur) : roue moteur à z = jeu au flasque, roue qui engrène
+dans le plan de sa menante, roue coaxiale à `z_parent + b_parent + jeu entre plans`, plus le décalage saisi.
+Tige = hauteur entre flasques + 2 épaisseurs. Alésage sur tige fixe = Ø tige + jeu de rotation (+ compensation d'impression).
+
+## Simplifications du modèle
+
+- Rendement par engrènement constant (indépendant de la charge, de la vitesse et de la lubrification) ;
+  planétaire : η² quel que soit le montage.
+- Dents indéformables, pas de flexion des arbres ni de jeu de paliers ; le jeu au flanc n'est
+  qu'un amincissement géométrique des dents.
+- Lewis : effort appliqué en tête sur une seule dent, sans concentration de contrainte détaillée ni
+  pression de contact (usure). Pièces imprimées supposées homogènes.
+- Couronne et crémaillère : denture droite, sans déport ; couronne sans congé de pied.
+- Planétaire : satellites équirépartis, partage de charge parfait, porte-satellites sans inertie.
+- Moteur : paramètres constants (pas d'échauffement de R ni d'affaiblissement des aimants),
+  frottement interne sec constant. PWM : bornes en court-circuit à l'état bas.
+- Hélicoïdal : le congé de pied est calculé dans le plan apparent avec le rayon d'outil normal.
+- Montage 3D : collisions testées sur les encombrements (cercles de tête), tiges et flasques rigides,
+  pas de fixation moteur ni d'entretoises entre flasques ; entre axes non parallèles, test par sphères englobantes.
+- Coniques : approximation de Tredgold, denture droite rétrécie linéairement. Vis sans fin : roue sans gorge, μ = 0,2.
