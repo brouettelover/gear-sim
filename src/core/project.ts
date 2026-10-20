@@ -135,10 +135,23 @@ export interface Computed {
 export function computeProject(p: Project): Computed {
   // roues montées sur tige : alésage imposé par la tige
   const rods = p.mode === 'chain' ? applyRodBores(p.chain, p.assembly) : { chain: p.chain, ids: [] };
-  const train = p.mode === 'planetary'
+  let train = p.mode === 'planetary'
     ? analyzePlanetary(p.planetary, p.print, p.materials, p.meshEfficiency)
     : analyzeChain(rods.chain, p.print, p.materials, p.meshEfficiency);
-  const assembly = analyzeAssembly(train, p.mode === 'chain' ? rods.chain : null, p.assembly, p.print, rods.ids);
+  let assembly = analyzeAssembly(train, p.mode === 'chain' ? rods.chain : null, p.assembly, p.print, rods.ids);
+  // roues dont les plans ne se recouvrent pas : hors prise, la roue menée ne tourne pas (second calcul)
+  if (p.mode === 'chain') {
+    const parentOf = new Map(train.nodes.map((n) => [n.id, n.parentId]));
+    const off = new Set<string>();
+    for (const m of train.meshes) {
+      if (m.type !== 'parallel' || (assembly.meshOverlap[`${m.a}|${m.b}`] ?? 1) > 1e-9) continue;
+      off.add(parentOf.get(m.b) === m.a ? m.b : m.a);
+    }
+    if (off.size) {
+      train = analyzeChain(rods.chain, p.print, p.materials, p.meshEfficiency, off);
+      assembly = analyzeAssembly(train, rods.chain, p.assembly, p.print, rods.ids);
+    }
+  }
   const motor = motorModel(p.motor);
   // sortie crémaillère : le "rapport" est ramené à l'arbre du pignon (charge vue par le pignon)
   let ratio = Math.abs(train.ratio);

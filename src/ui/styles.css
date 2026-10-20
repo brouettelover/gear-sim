@@ -190,3 +190,7 @@ input, select { font: inherit; color: var(--text); background: var(--panel); bor
 @media (max-width: 520px) { .grid3 { grid-template-columns: 1fr 1fr; } }
 .subhead { font-size: 12.5px; color: var(--muted); margin: 12px 0 2px; font-weight: 600; }
 .scene .freerod { fill: var(--muted); cursor: move; }
+.toolbar.palette { gap: 6px; align-items: center; flex-wrap: wrap; }
+.toolbar.palette .chip { cursor: grab; user-select: none; }
+.scene .ghost { fill: none; stroke: var(--muted); }
+.scene .ghost.snapped { stroke: var(--ok); }

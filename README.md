@@ -27,7 +27,8 @@ Onglets, avec la vue animée du train et la liste des vérifications toujours vi
    (roues dont les plans se recouvrent, roue qui touche une tige, prise axiale, longueur de l'arbre moteur).
    **Axes perpendiculaires** : renvoi conique à 90° et vis sans fin (1 à 4 filets, irréversibilité calculée) ;
    la roue fille tourne sur un nouvel axe, visible en 3D. **Tige de transmission** : une roue à chaque bout d'une tige.
-   **Déplacement** : glisser une roue la fait tourner, avec toute sa tige, autour de sa roue menante (2D et 3D) ;
+   **Glisser-déposer** : une roue (ou une pièce de la palette) se pose n'importe où dans la vue 2D et s'accroche
+   à une roue voisine quand son centre arrive à l'entraxe ; posée à l'écart, ou hors du plan de sa menante, elle ne tourne pas ;
    en 3D, glisser la roue sélectionnée le long de sa tige change sa position axiale. **Tiges libres** : colonnes qui traversent les flasques
    sans porter de roue, déplaçables dans la vue 2D.
 3. **Moteur et charge** : préréglages N20 / 130 / 370 / 540 modifiables, paramètres identifiés, courbe

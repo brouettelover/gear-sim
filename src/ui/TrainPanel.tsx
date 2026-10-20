@@ -3,7 +3,7 @@
  */
 import type { Computed, Project } from '../core/project';
 import { defaultGear, newId } from '../core/project';
-import { describeRatio, directionLabel, type Placement, type PlanetaryMember } from '../core/train';
+import { descendantsOf, describeRatio, directionLabel, type Placement, type PlanetaryMember } from '../core/train';
 import { suggestMeshGear, type AssemblySpec } from '../core/assembly';
 import { DEG, MM, fmt, toMm, toRpm } from '../core/units';
 import type { Updater } from './App';
@@ -200,7 +200,7 @@ function ChainEditor({ project, computed, update, selectedId, onSelect }: { proj
       while (grew) {
         grew = false;
         for (const g of d.chain.gears) {
-          if (g.placement.kind !== 'root' && doomed.has(g.placement.parent) && !doomed.has(g.gear.id)) {
+          if ('parent' in g.placement && doomed.has(g.placement.parent) && !doomed.has(g.gear.id)) {
             doomed.add(g.gear.id);
             grew = true;
           }
@@ -217,17 +217,19 @@ function ChainEditor({ project, computed, update, selectedId, onSelect }: { proj
     });
 
   const others = gears.filter((g) => g.gear.id !== sel.gear.id);
+  // roues portées par la sélection : elles ne peuvent pas lui servir de menante (boucle)
+  const descendants = descendantsOf(project.chain, sel.gear.id);
   return (
     <Section title="Roues du train">
       <ul className="tree">
         {gears.map((g) => {
           const p = g.placement;
-          const parentName = p.kind !== 'root' ? gears.find((x) => x.gear.id === p.parent)?.gear.name : '';
+          const parentName = 'parent' in p ? gears.find((x) => x.gear.id === p.parent)?.gear.name : '';
           return (
             <li key={g.gear.id} className={g.gear.id === sel.gear.id ? 'selected' : ''} onClick={() => onSelect(g.gear.id)}>
               <b>{g.gear.name}</b> ({g.gear.teeth} d.){' '}
               <span className="muted">
-                {p.kind === 'root' ? 'sur l\'arbre moteur' : p.kind === 'mesh' ? `engrène avec ${parentName}` : `même arbre que ${parentName}`}
+                {p.kind === 'root' ? 'sur l\'arbre moteur' : p.kind === 'free' ? 'posée à l\'écart, immobile' : p.kind === 'mesh' ? `engrène avec ${parentName}` : `même arbre que ${parentName}`}
                 {g.gear.id === project.chain.outputId ? ' · sortie' : ''}
               </span>
             </li>
@@ -254,22 +256,39 @@ function ChainEditor({ project, computed, update, selectedId, onSelect }: { proj
             options={[
               { value: 'mesh', label: 'Engrène avec…' },
               { value: 'coaxial', label: 'Même arbre que…' },
+              { value: 'free', label: 'Posée à l\'écart (immobile)' },
             ]}
-            onChange={(v) => setPlacement((p) => (v === 'mesh' ? { kind: 'mesh', parent: (p as { parent: string }).parent, angle: 0 } : { kind: 'coaxial', parent: (p as { parent: string }).parent }))}
+            onChange={(v) =>
+              setPlacement((p) => {
+                const parent = 'parent' in p ? p.parent : others.find((g) => !descendants.has(g.gear.id))?.gear.id ?? gears[0].gear.id;
+                if (v === 'free') {
+                  const n = computed.train.nodes.find((x) => x.id === sel.gear.id);
+                  return { kind: 'free', x: n?.x ?? 0, y: n?.y ?? 0 };
+                }
+                return v === 'mesh' ? { kind: 'mesh', parent, angle: 0 } : { kind: 'coaxial', parent };
+              })
+            }
           />
-          <SelectField
-            label="Roue liée"
-            value={sel.placement.parent}
-            options={others.map((g) => ({ value: g.gear.id, label: g.gear.name }))}
-            onChange={(v) => setPlacement((p) => ({ ...(p as { kind: 'mesh'; angle: number }), parent: v }) as Placement)}
-          />
+          {'parent' in sel.placement ? (
+            <SelectField
+              label="Roue liée"
+              value={sel.placement.parent}
+              options={others.filter((g) => !descendants.has(g.gear.id)).map((g) => ({ value: g.gear.id, label: g.gear.name }))}
+              onChange={(v) => setPlacement((p) => ({ ...(p as { kind: 'mesh'; angle: number }), parent: v }) as Placement)}
+            />
+          ) : sel.placement.kind === 'free' ? (
+            <div className="grid2">
+              <NumField label="x" value={sel.placement.x} factor={MM} unit="mm" step={0.5} digits={2} onChange={(v) => setPlacement((p) => ({ ...(p as { kind: 'free'; x: number; y: number }), x: v }))} />
+              <NumField label="y" value={sel.placement.y} factor={MM} unit="mm" step={0.5} digits={2} onChange={(v) => setPlacement((p) => ({ ...(p as { kind: 'free'; x: number; y: number }), y: v }))} />
+            </div>
+          ) : null}
           {sel.placement.kind === 'mesh' && (
             <NumField label={['bevel', 'worm', 'wormwheel'].includes(sel.gear.type) ? 'Direction du renvoi' : 'Angle de placement'} value={sel.placement.angle} factor={DEG} unit="°" step={5} digits={1} onChange={(v) => setPlacement((p) => ({ ...(p as { kind: 'mesh'; parent: string; angle: number }), angle: v }))} hint="Direction de la roue menante vers le point primitif ; vous pouvez aussi glisser la roue dans la vue" />
           )}
         </div>
       )}
       <SelectField label="Arbre de sortie" value={project.chain.outputId} options={gears.map((g) => ({ value: g.gear.id, label: g.gear.name }))} onChange={(v) => update((d) => void (d.chain.outputId = v))} />
-      <p className="muted small">Une roue sur le même arbre est placée dans le plan suivant : c'est ainsi qu'on construit un train composé. Chaque arbre autre que celui du moteur est une tige (section « Montage 3D »). « Roue à l'autre bout de la tige » crée une tige de transmission avec une roue à chaque extrémité. Pour déplacer une roue, sélectionnez-la puis glissez-la : en 2D autour de sa roue menante (toute la tige suit), en 3D aussi le long de sa tige.</p>
+      <p className="muted small">Une roue sur le même arbre est placée dans le plan suivant : c'est ainsi qu'on construit un train composé. Chaque arbre autre que celui du moteur est une tige (section « Montage 3D »). « Roue à l'autre bout de la tige » crée une tige de transmission avec une roue à chaque extrémité. Pour déplacer une roue, glissez-la dans la vue 2D : elle s'accroche à une roue voisine quand elle arrive à l'entraxe, sinon elle reste posée à l'écart et ne tourne pas. Les pièces de la palette au-dessus de la vue se déposent de la même façon. En 3D, glissez la roue sélectionnée le long de sa tige : si elle quitte le plan de sa menante, elle s'arrête.</p>
     </Section>
   );
 }

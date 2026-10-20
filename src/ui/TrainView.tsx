@@ -7,7 +7,11 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent as RPointerEvent } from 'react';
 import type { Computed, Project } from '../core/project';
 import { contactOverlay } from '../core/contact';
-import { poses, type ChainSpec, type TrainNode } from '../core/train';
+import { poses, snapPlacement, type ChainSpec, type TrainNode } from '../core/train';
+import { defaultGear, newId } from '../core/project';
+import { gearGeometry, meshGeometry } from '../core/involute';
+import type { GearSpec } from '../core/types';
+import { MM } from '../core/units';
 import { fmt, toMm, toRpm } from '../core/units';
 import type { Updater } from './App';
 import { CheckField } from './fields';
@@ -24,6 +28,16 @@ interface Props {
 
 interface Box { x: number; y: number; w: number; h: number }
 
+type PaletteKind = 'spur' | 'internal' | 'rack' | 'rod';
+const PALETTE: { kind: PaletteKind; label: string }[] = [
+  { kind: 'spur', label: '⚙ Roue' },
+  { kind: 'internal', label: '◎ Couronne' },
+  { kind: 'rack', label: '▭ Crémaillère' },
+  { kind: 'rod', label: '● Tige libre' },
+];
+/** distance d'accrochage à l'entraxe d'une roue voisine (m) */
+const snapTol = (m: number) => Math.max(1.5 * MM, 1.5 * m);
+
 /**
  * Roue qui fixe la position de la tige de `id` : on remonte les roues coaxiales jusqu'à celle qui
  * engrène avec sa menante (la tige tourne alors autour de celle-ci). Aucune sur l'arbre moteur.
@@ -34,6 +48,7 @@ function shaftDrive(chain: ChainSpec, id: string): string | undefined {
   for (let i = 0; g && i < chain.gears.length; i++) {
     if (g.placement.kind === 'mesh') return g.gear.id;
     if (g.placement.kind === 'root') return undefined;
+    if (g.placement.kind === 'free') return g.gear.id;
     g = byId.get(g.placement.parent);
   }
   return undefined;
@@ -76,7 +91,9 @@ export function TrainView({ project, computed, update, selectedId, onSelect }: P
   const [theta, setTheta] = useState(0);
   const thetaRef = useRef(0);
   const [box, setBox] = useState<Box | null>(null);
-  const drag = useRef<{ kind: 'pan'; sx: number; sy: number; box: Box } | { kind: 'gear'; id: string } | { kind: 'rod'; id: string } | null>(null);
+  const drag = useRef<{ kind: 'pan'; sx: number; sy: number; box: Box } | { kind: 'gear'; id: string; ox: number; oy: number } | { kind: 'rod'; id: string } | null>(null);
+  // glisser-déposer depuis la palette : pièce en cours de dépôt et position du pointeur (écran)
+  const [pal, setPal] = useState<{ kind: PaletteKind; cx: number; cy: number } | null>(null);
 
   const paths = useMemo(() => new Map(train.nodes.map((n) => [n.id, shapePath(n.shape)])), [train]);
   const bounds = useMemo(() => sceneBounds(train.nodes.filter((n) => n.group === 0), train.mode === 'planetary'), [train]);
@@ -143,8 +160,11 @@ export function TrainView({ project, computed, update, selectedId, onSelect }: P
     if (gearId) {
       onSelect(gearId);
       const drive = train.mode === 'chain' ? shaftDrive(project.chain, gearId) : undefined;
-      if (drive) {
-        drag.current = { kind: 'gear', id: drive };
+      const dn = drive ? nodeById.get(drive) : undefined;
+      if (drive && dn && dn.group === 0) {
+        // on garde l'écart entre le pointeur et le centre de la roue saisie
+        const w = toWorld(e);
+        drag.current = { kind: 'gear', id: drive, ox: w.x - toMm(dn.x), oy: w.y - toMm(dn.y) };
         e.stopPropagation();
         return;
       }
@@ -169,20 +189,79 @@ export function TrainView({ project, computed, update, selectedId, onSelect }: P
       });
       return;
     }
-    const tg = project.chain.gears.find((x) => x.gear.id === d.id);
-    if (!tg || tg.placement.kind !== 'mesh') return;
-    const parent = nodeById.get(tg.placement.parent);
     const self = nodeById.get(d.id);
-    if (!parent || !self) return;
+    const tg = project.chain.gears.find((x) => x.gear.id === d.id);
+    if (!self || !tg) return;
     const w = toWorld(e);
-    const px = toMm(parent.x), py = toMm(parent.y);
-    // couronne fille : son centre est à l'opposé du point primitif
-    const ang = self.geo.kind === 'internal' ? Math.atan2(py - w.y, px - w.x) : Math.atan2(w.y - py, w.x - px);
+    // déplacement libre ; accrochage à l'entraxe d'une roue voisine
+    const pl = snapPlacement(train, project.chain, self, (w.x - d.ox) * MM, (w.y - d.oy) * MM, snapTol(self.geo.mn));
+    if (JSON.stringify(pl) === JSON.stringify(tg.placement)) return;
     update((dr) => {
       const g = dr.chain.gears.find((x) => x.gear.id === d.id);
-      if (g && g.placement.kind === 'mesh') g.placement.angle = Math.round(ang / (Math.PI / 180)) * (Math.PI / 180);
+      if (g) g.placement = pl;
     });
   };
+
+  // --- palette : nouvelle pièce déposée dans la vue ---
+  const base = project.chain.gears.find((g) => g.placement.kind === 'root')?.gear ?? project.chain.gears[0]?.gear;
+  const paletteSpec = (kind: PaletteKind): GearSpec | null => {
+    if (kind === 'rod') return null;
+    const common = { module: base?.module ?? MM, pressureAngle: base?.pressureAngle ?? (20 * Math.PI) / 180, faceWidth: base?.faceWidth ?? 6 * MM, materialId: base?.materialId ?? 'PETG', bore: { type: 'round' as const, diameter: 3 * MM, flat: 0 } };
+    const n = project.chain.gears.length + 1;
+    if (kind === 'internal') return defaultGear({ ...common, name: `Couronne ${n}`, type: 'internal', teeth: 60, rimWidth: 3 * MM });
+    if (kind === 'rack') return defaultGear({ ...common, name: `Crémaillère ${n}`, type: 'rack', teeth: 20, rimWidth: 3 * MM });
+    return defaultGear({ ...common, name: `Roue ${n}`, teeth: 24 });
+  };
+  const inScene = (cx: number, cy: number) => {
+    const r = svgRef.current?.getBoundingClientRect();
+    return !!r && cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom;
+  };
+  /** placement de la pièce de la palette lâchée au point écran (cx, cy) */
+  const palettePlacement = (kind: PaletteKind, cx: number, cy: number) => {
+    const w = toWorld({ clientX: cx, clientY: cy });
+    const spec = paletteSpec(kind);
+    if (!spec) return { w, spec, geo: undefined, placement: undefined };
+    const geo = gearGeometry(spec, project.print);
+    return { w, spec, geo, placement: snapPlacement(train, project.chain, { geo, spec }, w.x * MM, w.y * MM, snapTol(geo.mn)) };
+  };
+  useEffect(() => {
+    if (!pal) return;
+    const move = (e: PointerEvent) => setPal((p) => (p ? { ...p, cx: e.clientX, cy: e.clientY } : p));
+    const up = (e: PointerEvent) => {
+      const kind = pal.kind;
+      setPal(null);
+      if (!inScene(e.clientX, e.clientY)) return;
+      const { w, spec, placement } = palettePlacement(kind, e.clientX, e.clientY);
+      if (!spec || !placement) {
+        update((dr) => {
+          const k = (dr.assembly.freeRods ?? []).length;
+          dr.assembly.freeRods = [...(dr.assembly.freeRods ?? []), { id: newId(), name: `Colonne ${k + 1}`, x: (Math.round(w.x * 2) / 2) * MM, y: (Math.round(w.y * 2) / 2) * MM }];
+        });
+        return;
+      }
+      update((dr) => void dr.chain.gears.push({ gear: spec, placement }));
+      setTimeout(() => onSelect(spec.id));
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    return () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+    };
+  }, [pal?.kind]); // eslint-disable-line react-hooks/exhaustive-deps
+  const ghost = pal && inScene(pal.cx, pal.cy) ? palettePlacement(pal.kind, pal.cx, pal.cy) : null;
+  const ghostCenter = (() => {
+    if (!ghost) return null;
+    if (!ghost.geo || !ghost.placement) return { x: ghost.w.x, y: ghost.w.y, r: 1.5, snapped: false };
+    const pl = ghost.placement;
+    if (pl.kind === 'free') return { x: ghost.w.x, y: ghost.w.y, r: ghost.geo.kind === 'rack' ? 2 : toMm(ghost.geo.r), snapped: false };
+    if (pl.kind !== 'mesh') return null;
+    const P = nodeById.get(pl.parent)!;
+    const a = toMm(P.geo.kind === 'internal' ? meshGeometry(ghost.geo, P.geo).centerDistance : meshGeometry(P.geo, ghost.geo).centerDistance);
+    const sgn = ghost.geo.kind === 'internal' ? -1 : 1;
+    const r = ghost.geo.kind === 'rack' ? 2 : toMm(ghost.geo.r);
+    return { x: toMm(P.x) + sgn * a * Math.cos(pl.angle), y: toMm(P.y) + sgn * a * Math.sin(pl.angle), r, snapped: true };
+  })();
   const onPointerUp = () => (drag.current = null);
 
   const b = box ?? fit();
@@ -275,6 +354,25 @@ export function TrainView({ project, computed, update, selectedId, onSelect }: P
         <CheckField label="Encombrement" checked={opts.bbox} onChange={(v) => setOpts({ ...opts, bbox: v })} />
         <CheckField label="Couleur selon la résistance" checked={opts.safety} onChange={(v) => setOpts({ ...opts, safety: v })} />
       </div>
+      {train.mode === 'chain' && (
+        <div className="toolbar palette">
+          <span className="muted small">Glisser dans la vue :</span>
+          {PALETTE.map((it) => (
+            <button
+              key={it.kind}
+              className={`chip ${pal?.kind === it.kind ? 'active' : ''}`}
+              style={{ touchAction: 'none' }}
+              onPointerDown={(e) => {
+                e.preventDefault();
+                (e.target as Element).releasePointerCapture?.(e.pointerId);
+                setPal({ kind: it.kind, cx: e.clientX, cy: e.clientY });
+              }}
+            >
+              {it.label}
+            </button>
+          ))}
+        </div>
+      )}
       <svg
         ref={svgRef}
         className="scene"
@@ -340,6 +438,9 @@ export function TrainView({ project, computed, update, selectedId, onSelect }: P
               }}
             />
           ))}
+          {ghostCenter && (
+            <circle cx={ghostCenter.x} cy={ghostCenter.y} r={ghostCenter.r} className={`ghost ${ghostCenter.snapped ? 'snapped' : ''}`} strokeWidth={unit * 0.25} strokeDasharray={`${unit} ${unit / 2}`} />
+          )}
           {opts.bbox && <rect x={bounds.minX} y={bounds.minY} width={bounds.maxX - bounds.minX} height={bounds.maxY - bounds.minY} className="bbox" strokeWidth={unit * 0.15} />}
         </g>
         {/* textes dans le repère SVG (non inversé) */}
@@ -378,7 +479,7 @@ export function TrainView({ project, computed, update, selectedId, onSelect }: P
       </svg>
       <p className="hint">
         {hidden && <b>Les roues d'axes perpendiculaires (renvoi conique, vis sans fin) ne s'affichent qu'en 3D. </b>}
-        Molette : zoom · glisser le fond : déplacer · {train.mode === 'chain' ? 'glisser une roue : déplacer sa tige autour de la roue menante · ' : ''}clic : sélectionner{(project.assembly?.freeRods?.length ?? 0) > 0 ? ' · glisser une tige libre (disque gris) : la déplacer' : ''}.
+        Molette : zoom · glisser le fond : déplacer · {train.mode === 'chain' ? 'glisser une roue : la déplacer librement, elle s\'accroche quand elle arrive contre une autre roue (une roue à l\'écart ne tourne pas) · ' : ''}clic : sélectionner{(project.assembly?.freeRods?.length ?? 0) > 0 ? ' · glisser une tige libre (disque gris) : la déplacer' : ''}.
         {selectedNode && ` Sélection : ${selectedNode.spec.name}, ${fmt(Math.abs(toRpm(selectedNode.ratio * omega)), 1)} tr/min.`}
       </p>
       </>

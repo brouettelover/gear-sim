@@ -323,7 +323,7 @@ export function analyzeAssembly(train: TrainAnalysis, chain: ChainSpec | null, a
       frame.o = add(frame.o, mul(frame.w, off));
       groups[n.group] = frame;
       z = 0;
-    } else if (pl.kind !== 'root') {
+    } else if (pl.kind !== 'root' && pl.kind !== 'free') {
       const P = nodes.get(pl.parent);
       const pp = P ? placed[P.id] : undefined;
       if (P && pp) {

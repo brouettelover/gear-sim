@@ -24,6 +24,8 @@ import { fmt } from './units';
 
 export type Placement =
   | { kind: 'root' }
+  /** posée librement (glisser-déposer) : n'engrène avec rien, ne tourne pas ; position dans le plan du moteur (m) */
+  | { kind: 'free'; x: number; y: number }
   | { kind: 'mesh'; parent: string; angle: number }
   | { kind: 'coaxial'; parent: string };
 
@@ -106,6 +108,8 @@ export interface TrainMesh {
   loaded: boolean;
   /** parallèle (droit, hélicoïdal, couronne, crémaillère), conique ou vis sans fin */
   type: 'parallel' | 'bevel' | 'worm';
+  /** false : roues hors prise (plans décalés) ; la roue menée ne tourne pas */
+  engaged?: boolean;
   /** rendement de cet engrènement, dans le sens moteur → sortie et dans le sens inverse */
   efficiency: number;
   backEfficiency: number;
@@ -117,8 +121,10 @@ export interface TrainAnalysis {
   meshes: TrainMesh[];
   motorId: string;
   outputId: string;
-  /** rapport de réduction signé N = ω_moteur / ω_sortie */
+  /** rapport de réduction signé N = ω_moteur / ω_sortie (infini si la sortie n'est pas entraînée) */
   ratio: number;
+  /** la sortie n'est pas reliée au moteur par des engrènements en prise */
+  disconnected?: boolean;
   /** pour une crémaillère en sortie : vitesse linéaire par rad/s moteur (m) */
   linearOutput: boolean;
   efficiency: number;
@@ -149,7 +155,11 @@ const wrapSym = (a: number, p: number) => a - Math.round(a / p) * p;
 const wrap = (a: number, period: number) => a - Math.floor(a / period) * period;
 
 /** Analyse d'un train simple ou composé. */
-export function analyzeChain(chain: ChainSpec, print: PrintSettings, materials: Material[], meshEfficiency: number): TrainAnalysis {
+export function analyzeChain(
+  chain: ChainSpec, print: PrintSettings, materials: Material[], meshEfficiency: number,
+  /** roues menées dont l'engrènement avec leur menante est hors prise (plans décalés, voir assembly.ts) */
+  disengaged: ReadonlySet<string> = new Set(),
+): TrainAnalysis {
   const warnings: Warning[] = [];
   const nodes = new Map<string, TrainNode>();
   const meshes: TrainMesh[] = [];
@@ -162,7 +172,7 @@ export function analyzeChain(chain: ChainSpec, print: PrintSettings, materials: 
   // parcours en largeur depuis la roue moteur
   const children = new Map<string, TrainGear[]>();
   for (const g of chain.gears) {
-    if (g.placement.kind === 'root') continue;
+    if (g.placement.kind === 'root' || g.placement.kind === 'free') continue;
     const p = g.placement.parent;
     if (!byId.has(p)) {
       warnings.push({ severity: 'error', message: `« ${g.gear.name} » est rattachée à une roue inexistante.` });
@@ -189,13 +199,21 @@ export function analyzeChain(chain: ChainSpec, print: PrintSettings, materials: 
     meshesFromMotor: 0, onPath: false, count: 1,
   });
   const queue = [root.gear.id];
+  // roues posées librement : immobiles, chacune racine de ses roues coaxiales et menées
+  for (const g of chain.gears) {
+    if (g.placement.kind !== 'free' || g === root) continue;
+    const b = nodeBase(g.gear, print, materials, mates.get(g.gear.id));
+    nodes.set(g.gear.id, { id: g.gear.id, spec: g.gear, ...b, x: g.placement.x, y: g.placement.y, layer: 0, ratio: 0, phase: 0, meshesFromMotor: 0, onPath: false, count: 1, ...(b.geo.kind === 'rack' ? { rackAngle: 0, rackShift: -Math.floor(b.geo.z / 2) * b.geo.pt } : {}) });
+    warnings.push({ severity: 'warning', message: `« ${g.gear.name} » n'engrène avec aucune roue : elle ne tourne pas. Glissez-la contre une roue pour l'accrocher.` });
+    queue.push(g.gear.id);
+  }
   while (queue.length) {
     const pid = queue.shift()!;
     const p = nodes.get(pid)!;
     for (const c of children.get(pid) ?? []) {
       if (nodes.has(c.gear.id)) continue;
       const base = nodeBase(c.gear, print, materials, mates.get(c.gear.id));
-      const pl = c.placement as Exclude<Placement, { kind: 'root' }>;
+      const pl = c.placement as Exclude<Placement, { kind: 'root' } | { kind: 'free' }>;
       let node: TrainNode;
       if (pl.kind === 'coaxial') {
         if (p.geo.kind === 'rack') {
@@ -303,6 +321,12 @@ export function analyzeChain(chain: ChainSpec, print: PrintSettings, materials: 
         }
       }
       if (!node.link) node.group = p.group;
+      // engrènement hors prise : la roue menée (et tout ce qu'elle porte) reste immobile
+      if (pl.kind === 'mesh' && disengaged.has(c.gear.id)) {
+        node.ratio = 0;
+        const mm = meshes.find((x) => (x.a === pid && x.b === c.gear.id) || (x.b === pid && x.a === c.gear.id));
+        if (mm) mm.engaged = false;
+      }
       // rendement cumulé : celui de l'arbre parent × celui de l'engrènement (roue coaxiale : identique)
       const m = meshes.find((x) => (x.a === pid && x.b === c.gear.id) || (x.b === pid && x.a === c.gear.id));
       node.eff = p.eff * (pl.kind === 'mesh' && m ? m.efficiency : 1);
@@ -318,7 +342,11 @@ export function analyzeChain(chain: ChainSpec, print: PrintSettings, materials: 
   // chemin moteur → sortie
   const out = nodes.get(chain.outputId) ?? [...nodes.values()][nodes.size - 1];
   for (let n: TrainNode | undefined = out; n; n = n.parentId ? nodes.get(n.parentId) : undefined) n.onPath = true;
-  for (const m of meshes) m.loaded = nodes.get(m.a)!.onPath && nodes.get(m.b)!.onPath;
+  const disconnected = out.ratio === 0 && out.id !== root.gear.id;
+  if (disconnected) {
+    warnings.push({ severity: 'error', message: `La sortie « ${out.spec.name} » n'est pas entraînée : un engrènement du chemin n'est pas en prise (roue posée à l'écart ou plans décalés).` });
+  }
+  for (const m of meshes) m.loaded = !disconnected && m.engaged !== false && nodes.get(m.a)!.onPath && nodes.get(m.b)!.onPath;
 
   // les collisions dépendent des positions axiales : elles sont vérifiées par analyzeAssembly
   const list = [...nodes.values()];
@@ -332,7 +360,7 @@ export function analyzeChain(chain: ChainSpec, print: PrintSettings, materials: 
   }
   return {
     mode: 'chain', nodes: list, meshes, motorId: root.gear.id, outputId: out.id,
-    ratio: 1 / out.ratio, linearOutput: out.geo.kind === 'rack',
+    ratio: disconnected ? Infinity : 1 / out.ratio, disconnected, linearOutput: out.geo.kind === 'rack',
     efficiency, backEfficiency, gearInertia, warnings,
   };
 }
@@ -515,4 +543,48 @@ export function gearLoads(
 /** Libellé du sens de rotation par rapport au moteur. */
 export const directionLabel = (ratio: number) => (Math.abs(ratio) < 1e-12 ? 'fixe' : ratio > 0 ? 'même sens que le moteur' : 'sens inverse du moteur');
 
-export const describeRatio = (n: number) => `${fmt(Math.abs(n), 3)} : 1`;
+export const describeRatio = (n: number) => (Number.isFinite(n) ? `${fmt(Math.abs(n), 3)} : 1` : 'sortie non entraînée');
+
+/** La roue `id` et toutes celles qu'elle porte (coaxiales et menées, récursivement). */
+export function descendantsOf(chain: ChainSpec, id: string): Set<string> {
+  const out = new Set([id]);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const g of chain.gears) {
+      if ('parent' in g.placement && out.has(g.placement.parent) && !out.has(g.gear.id)) {
+        out.add(g.gear.id);
+        grew = true;
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Glisser-déposer : placement de la roue `self` (et de tout ce qu'elle porte) lâchée au point (x, y) du plan moteur.
+ * Si son centre tombe à l'entraxe de fonctionnement d'une roue du même plan (à `tol` près), elle s'y accroche
+ * (engrènement) ; sinon elle est posée librement et ne tourne pas.
+ */
+export function snapPlacement(t: TrainAnalysis, chain: ChainSpec, self: { id?: string; geo: GearGeometry; spec: GearSpec }, x: number, y: number, tol: number): Placement {
+  const own = self.id ? descendantsOf(chain, self.id) : new Set<string>();
+  const angleSpecial = (n: { spec: GearSpec }) => ['bevel', 'worm', 'wormwheel'].includes(n.spec.type);
+  let best: { err: number; placement: Placement } | undefined;
+  if (!angleSpecial(self)) {
+    for (const p of t.nodes) {
+      if (own.has(p.id) || p.group !== 0 || angleSpecial(p) || p.geo.kind === 'rack') continue;
+      if (Math.abs(p.geo.mn - self.geo.mn) > 1e-9 || Math.abs(p.spec.pressureAngle - self.spec.pressureAngle) > 1e-9) continue;
+      const kc = self.geo.kind;
+      if (p.geo.kind === 'internal' && kc !== 'external') continue;
+      if (kc === 'internal' && p.geo.kind !== 'external') continue;
+      // hélicoïdales : sens d'hélice opposés pour deux roues extérieures
+      const a = p.geo.kind === 'internal' ? meshGeometry(self.geo, p.geo).centerDistance : meshGeometry(p.geo, self.geo).centerDistance;
+      const dx = x - p.x, dy = y - p.y;
+      const err = Math.abs(Math.hypot(dx, dy) - a);
+      if (err > tol || (best && err >= best.err)) continue;
+      const angle = kc === 'internal' ? Math.atan2(-dy, -dx) : Math.atan2(dy, dx);
+      best = { err, placement: { kind: 'mesh', parent: p.id, angle: Math.round(angle / (Math.PI / 180)) * (Math.PI / 180) + 0 } };
+    }
+  }
+  return best?.placement ?? { kind: 'free', x, y };
+}
